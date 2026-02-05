@@ -5,19 +5,31 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.le.*
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelUuid
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import android.bluetooth.le.ScanFilter
-
+import java.util.HashSet
 
 class BLEViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val TAG = "BLEViewModel"
     }
+
+    /* ---------------------------------- */
+    /* Mesh Components                    */
+    /* ---------------------------------- */
+
+    private val neighborTable = NeighborTable()
+    private val bleAdvertiser = BLEAdvertiser(app)
+
+    // Prevent duplicate forwarding
+    private val seenPackets = HashSet<String>()
+
+    /* ---------------------------------- */
+    /* BLE Core                           */
+    /* ---------------------------------- */
 
     private val btManager = app.getSystemService(BluetoothManager::class.java)
     private val adapter = btManager?.adapter
@@ -28,83 +40,154 @@ class BLEViewModel(app: Application) : AndroidViewModel(app) {
     private var scanning = false
     private var scanCallback: ScanCallback? = null
 
-    private val deviceMap = mutableMapOf<String, ScannedDevice>()
-
     private val _devices = MutableStateFlow<List<ScannedDevice>>(emptyList())
     val devices: StateFlow<List<ScannedDevice>> = _devices
 
-    /* ---------- Diagnostics ---------- */
-
-    private val _logs = MutableStateFlow<List<String>>(emptyList())
-    val logs: StateFlow<List<String>> = _logs
-
-    private fun log(msg: String) {
-        Log.d(TAG, msg)
-        _logs.value = (listOf("[${System.currentTimeMillis() % 100000}] $msg") + _logs.value)
-            .take(10)
-    }
-
-    /* ---------- Public API ---------- */
+    /* ---------------------------------- */
+    /* Public API                         */
+    /* ---------------------------------- */
 
     fun isBluetoothEnabled(): Boolean = adapter?.isEnabled == true
 
-    fun startScan(stopAfterMillis: Long = 15000L) {
+    fun startScan(stopAfterMillis: Long = 15_000L) {
+
         if (scanning) {
-            log("startScan: already scanning")
+            Log.d(TAG, "Already scanning")
             return
         }
 
         if (adapter == null || !adapter.isEnabled) {
-            log("Bluetooth disabled or adapter null")
+            Log.d(TAG, "Bluetooth disabled or adapter null")
             return
         }
 
-        deviceMap.clear()
         _devices.value = emptyList()
-
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid(BLEConstants.SERVICE_UUID))
-            .build()
-        val filters = listOf(
-            ScanFilter.Builder()
-                .setServiceUuid(ParcelUuid(BLEConstants.SERVICE_UUID))
-                .build()
-        )
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
+        val selfNodeId = MeshIdentity.getNodeId(getApplication())
+
         scanCallback = object : ScanCallback() {
 
-            override fun onScanResult(type: Int, result: ScanResult) {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+
+                val record = result.scanRecord ?: return
+                val data =
+                    record.manufacturerSpecificData[BLEConstants.MANUFACTURER_ID]
+                        ?: return
+
+                val packet = MeshPacket.fromBytes(data) ?: return
+
+                if (packet.version != BLEConstants.PROTOCOL_VERSION) return
+                if (packet.srcNodeId == selfNodeId) return
+
+                val packetId =
+                    "${packet.srcNodeId}_${packet.payload.contentHashCode()}"
+
+                // Duplicate suppression
+                if (seenPackets.contains(packetId)) return
+                seenPackets.add(packetId)
+
                 val address = result.device.address ?: return
-                val name = result.device.name ?: "BLE Device"
                 val rssi = result.rssi
 
-                deviceMap[address] = ScannedDevice(address, name, rssi)
-                _devices.value = deviceMap.values.toList()
+                when (packet.type) {
 
-                log("FOUND $address RSSI=$rssi")
+                    /* ---------------- HELLO ---------------- */
+
+                    BLEConstants.PACKET_TYPE_HELLO -> {
+
+                        neighborTable.update(
+                            nodeId = packet.srcNodeId,
+                            address = address,
+                            rssi = rssi
+                        )
+
+                        updateUi()
+
+                        Log.d(
+                            TAG,
+                            "HELLO from ${packet.srcNodeId.toString(16)}"
+                        )
+                    }
+
+                    /* ---------------- DATA ---------------- */
+
+                    BLEConstants.PACKET_TYPE_DATA -> {
+
+                        val message =
+                            packet.payload.toString(Charsets.UTF_8)
+
+                        Log.d(
+                            TAG,
+                            "DATA from ${packet.srcNodeId.toString(16)} → $message (TTL=${packet.ttl})"
+                        )
+
+                        // If I am destination → consume
+                        if (packet.destNodeId == selfNodeId ||
+                            packet.destNodeId == BLEConstants.BROADCAST_NODE_ID
+                        ) {
+                            Log.d(TAG, "Message delivered to this node")
+                        }
+
+                        // Forward if TTL > 0
+                        if (packet.ttl > 0) {
+
+                            val newTtl = (packet.ttl - 1).toByte()
+
+                            val forwarded = packet.copy(ttl = newTtl)
+
+
+                            bleAdvertiser.sendRawPacket(forwarded)
+
+                            Log.d(
+                                TAG,
+                                "Forwarded packet with TTL=${forwarded.ttl}"
+                            )
+                        }
+                    }
+                }
             }
 
             override fun onScanFailed(errorCode: Int) {
-                log("Scan failed: error=$errorCode")
+                Log.e(TAG, "Scan failed: $errorCode")
             }
         }
 
         try {
-            scanner?.startScan(filters, settings, scanCallback)
+            scanner?.startScan(null, settings, scanCallback)
             scanning = true
-            log("Scan started (filtered by SERVICE_UUID)")
+            Log.d(TAG, "Scan started")
         } catch (e: SecurityException) {
-            log("Scan failed: missing permission")
+            Log.e(TAG, "Scan failed: missing permission")
         }
 
-        handler.postDelayed({
-            stopScan()
-        }, stopAfterMillis)
+        handler.postDelayed({ stopScan() }, stopAfterMillis)
     }
+
+    /* ---------------------------------- */
+    /* UI Update                          */
+    /* ---------------------------------- */
+
+    private fun updateUi() {
+        val now = System.currentTimeMillis()
+
+        _devices.value = neighborTable.getAll().map {
+            val ageSec = (now - it.lastSeen) / 1000
+
+            ScannedDevice(
+                address = it.address,
+                name = "NODE_${it.nodeId.toString(16)} • ${ageSec}s ago",
+                rssi = it.rssi
+            )
+        }
+    }
+
+    /* ---------------------------------- */
+    /* Stop Scan                          */
+    /* ---------------------------------- */
 
     fun stopScan() {
         if (!scanning) return
@@ -112,11 +195,11 @@ class BLEViewModel(app: Application) : AndroidViewModel(app) {
         try {
             scanCallback?.let { scanner?.stopScan(it) }
         } catch (e: Exception) {
-            log("stopScan error: ${e.message}")
+            Log.w(TAG, "stopScan error: ${e.message}")
         }
 
         scanning = false
         scanCallback = null
-        log("Scan stopped")
+        Log.d(TAG, "Scan stopped")
     }
 }

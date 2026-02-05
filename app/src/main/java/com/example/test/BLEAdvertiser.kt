@@ -1,109 +1,243 @@
 package com.example.test
 
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.le.AdvertiseCallback
-import android.bluetooth.le.AdvertiseData
-import android.bluetooth.le.AdvertiseSettings
-import android.bluetooth.le.BluetoothLeAdvertiser
-import android.os.ParcelUuid
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.*
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 
-class BLEAdvertiser(private val adapter: BluetoothAdapter?) {
-
-    private var advertiser: BluetoothLeAdvertiser? = adapter?.bluetoothLeAdvertiser
-    private var advertising = false
-    private var callback: AdvertiseCallback? = null
+class BLEAdvertiser(private val context: Context) {
 
     companion object {
         private const val TAG = "BLEAdvertiser"
+        private const val HELLO_INTERVAL = 5_000L
     }
 
-    fun isSupported(): Boolean {
-        return adapter != null &&
+    private val adapter: BluetoothAdapter? =
+        context.getSystemService(BluetoothManager::class.java)?.adapter
+
+    private val advertiser: BluetoothLeAdvertiser? =
+        adapter?.bluetoothLeAdvertiser
+
+    private val handler = Handler(Looper.getMainLooper())
+
+    private var callback: AdvertiseCallback? = null
+    private var helloRunning = false
+
+    fun isSupported(): Boolean =
+        adapter != null &&
                 adapter.isEnabled &&
                 adapter.isMultipleAdvertisementSupported &&
                 advertiser != null
+
+    /* ================= HELLO LOOP ================= */
+
+    fun startHelloLoop() {
+        if (!isSupported()) {
+            Log.e(TAG, "BLE not supported")
+            return
+        }
+
+        if (helloRunning) return
+
+        helloRunning = true
+        sendHello()
     }
 
-    fun isAdvertising(): Boolean = advertising
+    fun stopHelloLoop() {
+        helloRunning = false
+        stopAdvertising()
+    }
 
-    fun startAdvertising(
-        onStarted: () -> Unit = {},
-        onFailed: (Int, String) -> Unit = { code, msg ->
-            Log.w(TAG, "Advertise failed $code: $msg")
-        }
-    ) {
-        if (adapter == null) {
-            onFailed(-1, "Bluetooth adapter is null")
-            return
-        }
+    private fun sendHello() {
 
-        if (!adapter.isEnabled) {
-            onFailed(-2, "Bluetooth is disabled")
-            return
-        }
+        if (!helloRunning) return
 
-        advertiser = adapter.bluetoothLeAdvertiser
-        if (advertiser == null) {
-            onFailed(-3, "BLE advertising not supported")
-            return
-        }
+        val nodeId = MeshIdentity.getNodeId(context)
 
-        if (advertising) {
-            onFailed(-4, "Already advertising")
-            return
-        }
+        val packet = MeshPacket(
+            version = BLEConstants.PROTOCOL_VERSION,
+            type = BLEConstants.PACKET_TYPE_HELLO,
+            srcNodeId = nodeId,
+            destNodeId = BLEConstants.BROADCAST_NODE_ID,
+            ttl = 1,
+            payload = ByteArray(0)
+        )
+
+        val payload = packet.toBytes()
 
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-            .setConnectable(true)
+            .setConnectable(false)
             .build()
 
-        // 🔑 THIS IS THE MOST IMPORTANT PART
         val data = AdvertiseData.Builder()
-            .addServiceUuid(ParcelUuid(BLEConstants.SERVICE_UUID))
-            .setIncludeDeviceName(true)
+            .addManufacturerData(
+                BLEConstants.MANUFACTURER_ID,
+                payload
+            )
             .build()
 
         callback = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-                advertising = true
-                Log.i(TAG, "Advertising started")
-                onStarted()
+                Log.d(TAG, "HELLO advertised")
             }
 
             override fun onStartFailure(errorCode: Int) {
-                advertising = false
-                val msg = when (errorCode) {
-                    ADVERTISE_FAILED_DATA_TOO_LARGE -> "DATA_TOO_LARGE"
-                    ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "TOO_MANY_ADVERTISERS"
-                    ADVERTISE_FAILED_ALREADY_STARTED -> "ALREADY_STARTED"
-                    ADVERTISE_FAILED_INTERNAL_ERROR -> "INTERNAL_ERROR"
-                    ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "FEATURE_UNSUPPORTED"
-                    else -> "UNKNOWN_ERROR"
-                }
-                Log.w(TAG, "Advertise failed: $errorCode ($msg)")
-                onFailed(errorCode, msg)
+                Log.e(TAG, "HELLO advertise failed: $errorCode")
             }
         }
 
-        try {
-            advertiser?.startAdvertising(settings, data, callback)
-        } catch (t: Throwable) {
-            advertising = false
-            onFailed(-999, t.message ?: "Exception")
-        }
+        advertiser?.startAdvertising(settings, data, callback)
+
+        handler.postDelayed({
+            stopAdvertising()
+        }, 800)
+
+        handler.postDelayed({
+            sendHello()
+        }, HELLO_INTERVAL)
     }
 
-    fun stopAdvertising() {
+    /* ================= DATA SEND ================= */
+    fun sendRawPacket(packet: MeshPacket) {
+
+        if (!isSupported()) return
+
+        val dataBytes = packet.toBytes()
+
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+            .setConnectable(false)
+            .build()
+
+        val data = AdvertiseData.Builder()
+            .addManufacturerData(
+                BLEConstants.MANUFACTURER_ID,
+                dataBytes
+            )
+            .build()
+
+        callback = object : AdvertiseCallback() {}
+
+        advertiser?.startAdvertising(settings, data, callback)
+
+        handler.postDelayed({
+            stopAdvertising()
+        }, 800)
+    }
+
+    fun sendDataMessage(message: String) {
+
+        if (!isSupported()) {
+            Log.e(TAG, "BLE not supported")
+            return
+        }
+
+        val nodeId = MeshIdentity.getNodeId(context)
+        val payloadBytes = message.toByteArray()
+
+        val packet = MeshPacket(
+            version = BLEConstants.PROTOCOL_VERSION,
+            type = BLEConstants.PACKET_TYPE_DATA,
+            srcNodeId = nodeId,
+            destNodeId = BLEConstants.BROADCAST_NODE_ID,
+            ttl = 3,
+            payload = payloadBytes
+        )
+
+        val dataBytes = packet.toBytes()
+
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+            .setConnectable(false)
+            .build()
+
+        val data = AdvertiseData.Builder()
+            .addManufacturerData(
+                BLEConstants.MANUFACTURER_ID,
+                dataBytes
+            )
+            .build()
+
+        callback = object : AdvertiseCallback() {
+            override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+                Log.d(TAG, "DATA message sent: $message")
+            }
+
+            override fun onStartFailure(errorCode: Int) {
+                Log.e(TAG, "DATA advertise failed: $errorCode")
+            }
+        }
+
+        advertiser?.startAdvertising(settings, data, callback)
+
+        handler.postDelayed({
+            stopAdvertising()
+        }, 800)
+    }
+
+    private fun stopAdvertising() {
         try {
             callback?.let { advertiser?.stopAdvertising(it) }
-        } catch (t: Throwable) {
-            Log.w(TAG, "stopAdvertising error: ${t.message}")
+        } catch (e: Exception) {
+            Log.w(TAG, "stopAdvertising error: ${e.message}")
         } finally {
-            advertising = false
             callback = null
         }
     }
+    fun sendData(message: String) {
+
+        if (!isSupported()) {
+            Log.e(TAG, "BLE not supported")
+            return
+        }
+
+        val nodeId = MeshIdentity.getNodeId(context)
+
+        val packet = MeshPacket(
+            version = BLEConstants.PROTOCOL_VERSION,
+            type = BLEConstants.PACKET_TYPE_DATA,
+            srcNodeId = nodeId,
+            destNodeId = BLEConstants.BROADCAST_NODE_ID,
+            ttl = 3, // allow future forwarding
+            payload = message.toByteArray(Charsets.UTF_8)
+        )
+
+        val payload = packet.toBytes()
+
+        Log.d(TAG, "Sending DATA: $message")
+
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+            .setConnectable(false)
+            .build()
+
+        val data = AdvertiseData.Builder()
+            .addManufacturerData(BLEConstants.MANUFACTURER_ID, payload)
+            .build()
+
+        val callback = object : AdvertiseCallback() {
+            override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+                Log.d(TAG, "DATA advertised")
+            }
+
+            override fun onStartFailure(errorCode: Int) {
+                Log.e(TAG, "DATA advertise failed: $errorCode")
+            }
+        }
+
+        advertiser?.startAdvertising(settings, data, callback)
+
+        handler.postDelayed({
+            advertiser?.stopAdvertising(callback)
+        }, 800)
+    }
+
 }

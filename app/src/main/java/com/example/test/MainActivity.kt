@@ -1,9 +1,9 @@
 package com.example.test
 
 import android.Manifest
-import android.bluetooth.BluetoothManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -26,21 +26,20 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var bleAdvertiser: BLEAdvertiser
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val btManager = getSystemService(BluetoothManager::class.java)
-        val adapter = btManager?.adapter
-        bleAdvertiser = BLEAdvertiser(adapter)
+        // ✅ Create advertiser ONCE with context
+        val advertiser = BLEAdvertiser(this)
+
+        // ✅ Persistent node ID
+        val nodeId = MeshIdentity.getNodeId(this)
+        Log.d("MESH", "My Node ID = ${nodeId.toString(16)}")
 
         setContent {
             MaterialTheme {
                 Surface {
-                    DeviceDiscoveryScreen(
-                        advertiser = bleAdvertiser
-                    )
+                    DeviceDiscoveryScreen(advertiser = advertiser)
                 }
             }
         }
@@ -59,7 +58,7 @@ fun DeviceDiscoveryScreen(
     val context = LocalContext.current
     val devices by bleViewModel.devices.collectAsState()
 
-    // -------- Permissions --------
+    /* -------- Permissions -------- */
     val permissions = remember {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(
@@ -74,9 +73,9 @@ fun DeviceDiscoveryScreen(
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { result: Map<String, Boolean> ->
+    ) { result ->
         if (!result.values.all { it }) {
-            Toast.makeText(context, "Permissions required for BLE", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "BLE permissions required", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -84,10 +83,11 @@ fun DeviceDiscoveryScreen(
         permissionLauncher.launch(permissions)
     }
 
-    // -------- UI --------
+    /* -------- UI -------- */
     Scaffold(
         floatingActionButton = {
             Column {
+
                 ExtendedFloatingActionButton(
                     text = { Text("Advertise") },
                     icon = {
@@ -97,19 +97,14 @@ fun DeviceDiscoveryScreen(
                         )
                     },
                     onClick = {
-                        advertiser.startAdvertising(
-                            onStarted = {
-                                Toast.makeText(context, "Advertising started", Toast.LENGTH_SHORT).show()
-                            },
-                            onFailed = { code: Int, message: String ->
-                                Toast.makeText(
-                                    context,
-                                    "Advertise failed ($code): $message",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            }
-                        )
+                        advertiser.    startHelloLoop()
+                        Toast.makeText(
+                            context,
+                            "HELLO loop started",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }
+
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -127,13 +122,29 @@ fun DeviceDiscoveryScreen(
                             Toast.makeText(context, "Enable Bluetooth", Toast.LENGTH_SHORT).show()
                             return@ExtendedFloatingActionButton
                         }
-
-                        bleViewModel.startScan(stopAfterMillis = 15_000L)
+                        bleViewModel.startScan(300_000L)
                     }
                 )
+                Spacer(modifier = Modifier.height(12.dp))
+
+                ExtendedFloatingActionButton(
+                    text = { Text("Send Test Message") },
+                    icon = {
+                        Icon(
+                            painter = painterResource(id = R.drawable.mynauisendsolid),
+                            contentDescription = "Send"
+                        )
+                    },
+                    onClick = {
+                        advertiser.sendData("Hello Mesh 🚀")
+                        Toast.makeText(context, "Message sent", Toast.LENGTH_SHORT).show()
+                    }
+                )
+
             }
         }
     ) { innerPadding ->
+
         Column(
             modifier = Modifier
                 .padding(innerPadding)
@@ -141,7 +152,7 @@ fun DeviceDiscoveryScreen(
         ) {
 
             Text(
-                text = "Nearby Devices",
+                text = "Nearby Mesh Nodes",
                 style = MaterialTheme.typography.titleMedium
             )
 
@@ -149,26 +160,20 @@ fun DeviceDiscoveryScreen(
 
             if (devices.isEmpty()) {
                 Text(
-                    text = "No devices found yet. Tap Scan.",
+                    text = "No nodes found. Tap Scan.",
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
             } else {
                 LazyColumn {
-                    items(
-                        items = devices,
-                        key = { device: ScannedDevice -> device.address }
-                    ) { device: ScannedDevice ->
-                        DeviceRow(
-                            device = device,
-                            onClick = { selected: ScannedDevice ->
-                                bleViewModel.stopScan()
-                                Toast.makeText(
-                                    context,
-                                    "Selected ${selected.name ?: selected.address}",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                        )
+                    items(devices, key = { it.address }) { device ->
+                        DeviceRow(device) {
+                            bleViewModel.stopScan()
+                            Toast.makeText(
+                                context,
+                                "Selected ${device.name}",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
                     }
                 }
             }
@@ -188,6 +193,7 @@ fun DeviceRow(
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+
         Image(
             painter = painterResource(id = R.drawable.avatar),
             contentDescription = null,
@@ -197,7 +203,7 @@ fun DeviceRow(
         Spacer(modifier = Modifier.width(12.dp))
 
         Column {
-            Text(text = device.name ?: "Unknown")
+            Text(text = device.name ?: "MESH_NODE")   // ✅ FIX HERE
             Text(text = device.address, fontSize = 12.sp)
         }
 
@@ -206,3 +212,149 @@ fun DeviceRow(
         Text(text = "${device.rssi} dBm", fontSize = 12.sp)
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
