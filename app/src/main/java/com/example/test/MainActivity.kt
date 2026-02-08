@@ -136,7 +136,7 @@ fun DeviceDiscoveryScreen(
                         )
                     },
                     onClick = {
-                        advertiser.sendData("Hello Mesh 🚀")
+                        advertiser.sendData("Hi Mesh")
                         Toast.makeText(context, "Message sent", Toast.LENGTH_SHORT).show()
                     }
                 )
