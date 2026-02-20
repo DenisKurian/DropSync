@@ -29,10 +29,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ✅ Create advertiser ONCE with context
         val advertiser = BLEAdvertiser(this)
 
-        // ✅ Persistent node ID
         val nodeId = MeshIdentity.getNodeId(this)
         Log.d("MESH", "My Node ID = ${nodeId.toString(16)}")
 
@@ -55,10 +53,14 @@ fun DeviceDiscoveryScreen(
         )
     )
 ) {
+
     val context = LocalContext.current
+
     val devices by bleViewModel.devices.collectAsState()
+    val meshEvents by bleViewModel.meshEvents.collectAsState()
 
     /* -------- Permissions -------- */
+
     val permissions = remember {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(
@@ -84,39 +86,24 @@ fun DeviceDiscoveryScreen(
     }
 
     /* -------- UI -------- */
+
     Scaffold(
         floatingActionButton = {
+
             Column {
 
                 ExtendedFloatingActionButton(
-                    text = { Text("Advertise") },
-                    icon = {
-                        Icon(
-                            painter = painterResource(id = R.drawable.mynauisendsolid),
-                            contentDescription = "Advertise"
-                        )
-                    },
                     onClick = {
-                        advertiser.    startHelloLoop()
-                        Toast.makeText(
-                            context,
-                            "HELLO loop started",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        advertiser.startHelloLoop()
+                        Toast.makeText(context, "HELLO loop started", Toast.LENGTH_SHORT).show()
                     }
-
-                )
+                ) {
+                    Text("Advertise")
+                }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
                 ExtendedFloatingActionButton(
-                    text = { Text("Scan") },
-                    icon = {
-                        Icon(
-                            painter = painterResource(id = R.drawable.mynauisendsolid),
-                            contentDescription = "Scan"
-                        )
-                    },
                     onClick = {
                         if (!bleViewModel.isBluetoothEnabled()) {
                             Toast.makeText(context, "Enable Bluetooth", Toast.LENGTH_SHORT).show()
@@ -124,23 +111,20 @@ fun DeviceDiscoveryScreen(
                         }
                         bleViewModel.startScan(300_000L)
                     }
-                )
+                ) {
+                    Text("Scan")
+                }
+
                 Spacer(modifier = Modifier.height(12.dp))
 
                 ExtendedFloatingActionButton(
-                    text = { Text("Send Test Message") },
-                    icon = {
-                        Icon(
-                            painter = painterResource(id = R.drawable.mynauisendsolid),
-                            contentDescription = "Send"
-                        )
-                    },
                     onClick = {
-                        advertiser.sendData("Hi Mesh")
+                        bleViewModel.sendMessage("Hi Mesh")
                         Toast.makeText(context, "Message sent", Toast.LENGTH_SHORT).show()
                     }
-                )
-
+                ) {
+                    Text("Send Test Message")
+                }
             }
         }
     ) { innerPadding ->
@@ -150,6 +134,8 @@ fun DeviceDiscoveryScreen(
                 .padding(innerPadding)
                 .padding(16.dp)
         ) {
+
+            /* -------- Nearby Nodes -------- */
 
             Text(
                 text = "Nearby Mesh Nodes",
@@ -177,6 +163,70 @@ fun DeviceDiscoveryScreen(
                     }
                 }
             }
+
+            /* -------- Mesh Activity -------- */
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Divider()
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = "Mesh Network Activity",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(250.dp)
+            ) {
+
+                items(meshEvents) { event ->
+
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                    ) {
+
+                        Column(
+                            modifier = Modifier.padding(12.dp)
+                        ) {
+
+                            Text(
+                                text = "Node: ${event.srcNodeId.toString(16)}",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+
+                            Spacer(Modifier.height(4.dp))
+
+                            Text(event.message)
+
+                            Spacer(Modifier.height(4.dp))
+
+                            Text("TTL: ${event.ttl}")
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            /* -------- Graph Visualization -------- */
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(300.dp)
+                    .padding(bottom = 120.dp) // space for FABs
+            ) {
+                MeshGraphScreen(viewModel = bleViewModel)
+            }
+
         }
     }
 }
@@ -203,7 +253,7 @@ fun DeviceRow(
         Spacer(modifier = Modifier.width(12.dp))
 
         Column {
-            Text(text = device.name ?: "MESH_NODE")   // ✅ FIX HERE
+            Text(text = device.name ?: "MESH_NODE")
             Text(text = device.address, fontSize = 12.sp)
         }
 
@@ -212,149 +262,3 @@ fun DeviceRow(
         Text(text = "${device.rssi} dBm", fontSize = 12.sp)
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

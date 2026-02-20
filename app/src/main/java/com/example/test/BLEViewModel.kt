@@ -9,7 +9,7 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import java.util.HashSet
+import java.util.concurrent.ConcurrentHashMap
 
 class BLEViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -24,8 +24,73 @@ class BLEViewModel(app: Application) : AndroidViewModel(app) {
     private val neighborTable = NeighborTable()
     private val bleAdvertiser = BLEAdvertiser(app)
 
-    // Prevent duplicate forwarding
-    private val seenPackets = HashSet<String>()
+    private val selfNodeId = MeshIdentity.getNodeId(app)
+
+    private val seenPackets = ConcurrentHashMap<String, Long>()
+
+    /* ---------------------------------- */
+    /* Mesh Visualization Data            */
+    /* ---------------------------------- */
+
+    private val _meshEvents = MutableStateFlow<List<MeshEvent>>(emptyList())
+    val meshEvents: StateFlow<List<MeshEvent>> = _meshEvents
+
+    private val _meshNodes = MutableStateFlow<List<MeshNode>>(emptyList())
+    val meshNodes: StateFlow<List<MeshNode>> = _meshNodes
+
+    private val _meshEdges = MutableStateFlow<List<MeshEdge>>(emptyList())
+    val meshEdges: StateFlow<List<MeshEdge>> = _meshEdges
+
+    /* -------- Packet Animation -------- */
+
+    private val _packetAnimations =
+        MutableStateFlow<List<PacketAnimation>>(emptyList())
+
+    val packetAnimations: StateFlow<List<PacketAnimation>> =
+        _packetAnimations
+
+    private fun addPacketAnimation(from: Int, to: Int) {
+
+        val list = _packetAnimations.value.toMutableList()
+
+        list.add(PacketAnimation(from, to))
+
+        _packetAnimations.value = list.takeLast(20)
+    }
+
+    /* ---------------------------------- */
+    /* Helpers                            */
+    /* ---------------------------------- */
+
+    private fun addMeshEvent(event: MeshEvent) {
+        val current = _meshEvents.value.toMutableList()
+        current.add(0, event)
+        _meshEvents.value = current.take(50)
+    }
+
+    private fun updateGraph(packet: MeshPacket) {
+
+        val nodes = _meshNodes.value.toMutableList()
+        val edges = _meshEdges.value.toMutableList()
+
+        if (nodes.none { it.nodeId == packet.srcNodeId }) {
+            nodes.add(MeshNode(packet.srcNodeId))
+        }
+
+        if (nodes.none { it.nodeId == selfNodeId }) {
+            nodes.add(MeshNode(selfNodeId))
+        }
+
+        edges.add(
+            MeshEdge(
+                from = packet.srcNodeId,
+                to = selfNodeId
+            )
+        )
+
+        _meshNodes.value = nodes.takeLast(20)
+        _meshEdges.value = edges.takeLast(40)
+    }
 
     /* ---------------------------------- */
     /* BLE Core                           */
@@ -47,27 +112,22 @@ class BLEViewModel(app: Application) : AndroidViewModel(app) {
     /* Public API                         */
     /* ---------------------------------- */
 
+    fun sendMessage(text: String) {
+        bleAdvertiser.sendData(text)
+    }
+
     fun isBluetoothEnabled(): Boolean = adapter?.isEnabled == true
 
     fun startScan(stopAfterMillis: Long = 15_000L) {
 
-        if (scanning) {
-            Log.d(TAG, "Already scanning")
-            return
-        }
-
-        if (adapter == null || !adapter.isEnabled) {
-            Log.d(TAG, "Bluetooth disabled or adapter null")
-            return
-        }
+        if (scanning) return
+        if (adapter == null || !adapter.isEnabled) return
 
         _devices.value = emptyList()
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
-
-        val selfNodeId = MeshIdentity.getNodeId(getApplication())
 
         scanCallback = object : ScanCallback() {
 
@@ -83,19 +143,17 @@ class BLEViewModel(app: Application) : AndroidViewModel(app) {
                 if (packet.version != BLEConstants.PROTOCOL_VERSION) return
                 if (packet.srcNodeId == selfNodeId) return
 
-                val packetId =
-                    "${packet.srcNodeId}_${packet.payload.contentHashCode()}"
+                val uniqueKey = "${packet.srcNodeId}_${packet.packetId}"
 
-                // Duplicate suppression
-                if (seenPackets.contains(packetId)) return
-                seenPackets.add(packetId)
+                if (seenPackets.containsKey(uniqueKey)) return
+                seenPackets[uniqueKey] = System.currentTimeMillis()
 
                 val address = result.device.address ?: return
                 val rssi = result.rssi
 
                 when (packet.type) {
 
-                    /* ---------------- HELLO ---------------- */
+                    /* -------- HELLO -------- */
 
                     BLEConstants.PACKET_TYPE_HELLO -> {
 
@@ -107,13 +165,10 @@ class BLEViewModel(app: Application) : AndroidViewModel(app) {
 
                         updateUi()
 
-                        Log.d(
-                            TAG,
-                            "HELLO from ${packet.srcNodeId.toString(16)}"
-                        )
+                        Log.d(TAG, "HELLO from ${packet.srcNodeId.toString(16)}")
                     }
 
-                    /* ---------------- DATA ---------------- */
+                    /* -------- DATA -------- */
 
                     BLEConstants.PACKET_TYPE_DATA -> {
 
@@ -122,31 +177,54 @@ class BLEViewModel(app: Application) : AndroidViewModel(app) {
 
                         Log.d(
                             TAG,
-                            "DATA from ${packet.srcNodeId.toString(16)} → $message (TTL=${packet.ttl})"
+                            "DATA from ${packet.srcNodeId.toString(16)} → $message TTL=${packet.ttl}"
                         )
 
-                        // If I am destination → consume
+                        addMeshEvent(
+                            MeshEvent(
+                                packetId = packet.packetId,
+                                srcNodeId = packet.srcNodeId,
+                                message = message,
+                                ttl = packet.ttl.toInt()
+                            )
+                        )
+
+                        updateGraph(packet)
+
+                        // 🔥 animation: source → this node
+                        addPacketAnimation(packet.srcNodeId, selfNodeId)
+
+                        // Deliver locally
                         if (packet.destNodeId == selfNodeId ||
                             packet.destNodeId == BLEConstants.BROADCAST_NODE_ID
                         ) {
-                            Log.d(TAG, "Message delivered to this node")
+                            sendAck(packet)
                         }
 
-                        // Forward if TTL > 0
-                        if (packet.ttl > 0) {
+                        // Forward
+                        if (packet.ttl > 1) {
 
-                            val newTtl = (packet.ttl - 1).toByte()
-
-                            val forwarded = packet.copy(ttl = newTtl)
-
+                            val forwarded = packet.copy(
+                                ttl = (packet.ttl - 1).toByte()
+                            )
 
                             bleAdvertiser.sendRawPacket(forwarded)
 
-                            Log.d(
-                                TAG,
-                                "Forwarded packet with TTL=${forwarded.ttl}"
-                            )
+                            // 🔥 animation: forward hop
+                            addPacketAnimation(selfNodeId, forwarded.destNodeId)
+
+                            Log.d(TAG, "Forwarded packet id=${forwarded.packetId}")
                         }
+                    }
+
+                    /* -------- ACK -------- */
+
+                    BLEConstants.PACKET_TYPE_ACK -> {
+
+                        val ackedId =
+                            packet.payload.toString(Charsets.UTF_8)
+
+                        Log.d(TAG, "ACK received for packet $ackedId")
                     }
                 }
             }
@@ -156,15 +234,34 @@ class BLEViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
 
-        try {
-            scanner?.startScan(null, settings, scanCallback)
-            scanning = true
-            Log.d(TAG, "Scan started")
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Scan failed: missing permission")
-        }
+        scanner?.startScan(null, settings, scanCallback)
+        scanning = true
 
         handler.postDelayed({ stopScan() }, stopAfterMillis)
+    }
+
+    /* ---------------------------------- */
+    /* ACK SYSTEM                         */
+    /* ---------------------------------- */
+
+    private fun sendAck(original: MeshPacket) {
+
+        val ackPayload =
+            original.packetId.toString().toByteArray()
+
+        val ackPacket = MeshPacket(
+            version = BLEConstants.PROTOCOL_VERSION,
+            type = BLEConstants.PACKET_TYPE_ACK,
+            packetId = original.packetId,
+            srcNodeId = selfNodeId,
+            destNodeId = original.srcNodeId,
+            ttl = BLEConstants.DEFAULT_TTL,
+            payload = ackPayload
+        )
+
+        bleAdvertiser.sendRawPacket(ackPacket)
+
+        Log.d(TAG, "ACK sent for packet ${original.packetId}")
     }
 
     /* ---------------------------------- */
@@ -172,9 +269,11 @@ class BLEViewModel(app: Application) : AndroidViewModel(app) {
     /* ---------------------------------- */
 
     private fun updateUi() {
+
         val now = System.currentTimeMillis()
 
         _devices.value = neighborTable.getAll().map {
+
             val ageSec = (now - it.lastSeen) / 1000
 
             ScannedDevice(
@@ -190,16 +289,12 @@ class BLEViewModel(app: Application) : AndroidViewModel(app) {
     /* ---------------------------------- */
 
     fun stopScan() {
+
         if (!scanning) return
 
-        try {
-            scanCallback?.let { scanner?.stopScan(it) }
-        } catch (e: Exception) {
-            Log.w(TAG, "stopScan error: ${e.message}")
-        }
+        scanCallback?.let { scanner?.stopScan(it) }
 
         scanning = false
         scanCallback = null
-        Log.d(TAG, "Scan stopped")
     }
 }

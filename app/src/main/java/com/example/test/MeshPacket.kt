@@ -5,6 +5,7 @@ import java.nio.ByteBuffer
 data class MeshPacket(
     val version: Byte,
     val type: Byte,
+    val packetId: Int,
     val srcNodeId: Int,
     val destNodeId: Int,
     val ttl: Byte,
@@ -13,19 +14,21 @@ data class MeshPacket(
 
     fun toBytes(): ByteArray {
 
+        require(payload.size <= BLEConstants.MAX_PAYLOAD_SIZE) {
+            "Payload too large"
+        }
+
         val buffer = ByteBuffer.allocate(
             BLEConstants.HEADER_SIZE + payload.size
         )
 
         buffer.put(version)
         buffer.put(type)
+        buffer.putInt(packetId)
         buffer.putInt(srcNodeId)
         buffer.putInt(destNodeId)
         buffer.put(ttl)
-
-        // store payload length as unsigned byte
         buffer.put(payload.size.toByte())
-
         buffer.put(payload)
 
         return buffer.array()
@@ -41,11 +44,12 @@ data class MeshPacket(
 
             val version = buffer.get()
             val type = buffer.get()
+            val packetId = buffer.int
             val src = buffer.int
             val dest = buffer.int
             val ttl = buffer.get()
 
-            // FIX: unsigned conversion
+            // unsigned payload length
             val payloadLen = buffer.get().toInt() and 0xFF
 
             if (payloadLen > BLEConstants.MAX_PAYLOAD_SIZE) return null
@@ -57,6 +61,7 @@ data class MeshPacket(
             return MeshPacket(
                 version = version,
                 type = type,
+                packetId = packetId,
                 srcNodeId = src,
                 destNodeId = dest,
                 ttl = ttl,
