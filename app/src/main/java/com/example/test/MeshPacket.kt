@@ -43,13 +43,15 @@ data class MeshPacket(
             val buffer = ByteBuffer.wrap(data)
 
             val version = buffer.get()
+
+            if (version != BLEConstants.PROTOCOL_VERSION) return null
+
             val type = buffer.get()
-            val packetId = buffer.int
-            val src = buffer.int
-            val dest = buffer.int
+            val packetId = buffer.getInt()
+            val src = buffer.getInt()
+            val dest = buffer.getInt()
             val ttl = buffer.get()
 
-            // unsigned payload length
             val payloadLen = buffer.get().toInt() and 0xFF
 
             if (payloadLen > BLEConstants.MAX_PAYLOAD_SIZE) return null

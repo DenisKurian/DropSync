@@ -13,8 +13,12 @@ class BLEAdvertiser(private val context: Context) {
 
     companion object {
         private const val TAG = "BLEAdvertiser"
-        private const val HELLO_INTERVAL = 5_000L
+        private const val HELLO_INTERVAL = 5000L
+        private const val ADVERTISE_DURATION = 800L
     }
+
+    private var helloPaused = false
+    private var advertisingBusy = false
 
     private val adapter: BluetoothAdapter? =
         context.getSystemService(BluetoothManager::class.java)?.adapter
@@ -27,8 +31,10 @@ class BLEAdvertiser(private val context: Context) {
     private var callback: AdvertiseCallback? = null
     private var helloRunning = false
 
-    // Packet ID generator (thread-safe)
     private val packetCounter = AtomicInteger(0)
+
+    private val selfNodeId =
+        MeshIdentity.getNodeId(context)
 
     fun isSupported(): Boolean =
         adapter != null &&
@@ -39,6 +45,7 @@ class BLEAdvertiser(private val context: Context) {
     /* ================= HELLO LOOP ================= */
 
     fun startHelloLoop() {
+
         if (!isSupported()) {
             Log.e(TAG, "BLE not supported")
             return
@@ -47,35 +54,65 @@ class BLEAdvertiser(private val context: Context) {
         if (helloRunning) return
 
         helloRunning = true
-        sendHello()
+        helloPaused = false
+
+        scheduleHello()
     }
 
     fun stopHelloLoop() {
         helloRunning = false
+        handler.removeCallbacksAndMessages(null)
         stopAdvertising()
+    }
+
+    private fun scheduleHello() {
+
+        if (!helloRunning || helloPaused) return
+
+        handler.postDelayed({
+            sendHello()
+        }, HELLO_INTERVAL)
     }
 
     private fun sendHello() {
 
-        if (!helloRunning) return
+        if (!helloRunning || helloPaused) return
 
-        val nodeId = MeshIdentity.getNodeId(context)
+        val deviceName =
+            (android.os.Build.MODEL ?: "Android").take(10)
+
+        val payload =
+            deviceName.toByteArray(Charsets.UTF_8)
 
         val packet = MeshPacket(
             version = BLEConstants.PROTOCOL_VERSION,
             type = BLEConstants.PACKET_TYPE_HELLO,
             packetId = packetCounter.incrementAndGet(),
-            srcNodeId = nodeId,
+            srcNodeId = selfNodeId,
             destNodeId = BLEConstants.BROADCAST_NODE_ID,
             ttl = 1,
-            payload = byteArrayOf()
+            payload = payload
         )
 
         sendRawPacket(packet)
 
-        handler.postDelayed({
-            sendHello()
-        }, HELLO_INTERVAL)
+        scheduleHello()
+    }
+
+    /* ================= HELLO CONTROL ================= */
+
+    fun pauseHello() {
+        helloPaused = true
+        stopAdvertising()
+    }
+
+    fun resumeHello() {
+
+        helloPaused = false
+
+        if (helloRunning) {
+            scheduleHello()
+        }
     }
 
     /* ================= GENERIC PACKET SENDER ================= */
@@ -83,6 +120,17 @@ class BLEAdvertiser(private val context: Context) {
     fun sendRawPacket(packet: MeshPacket) {
 
         if (!isSupported()) return
+        if (advertisingBusy) return
+
+        advertisingBusy = true
+
+        try {
+            callback?.let {
+                advertiser?.stopAdvertising(it)
+            }
+        } catch (_: Exception) {}
+
+        callback = null
 
         val dataBytes = packet.toBytes()
 
@@ -100,62 +148,87 @@ class BLEAdvertiser(private val context: Context) {
             .build()
 
         callback = object : AdvertiseCallback() {
+
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-                Log.d(
-                    TAG,
-                    "Packet advertised → type=${packet.type} id=${packet.packetId} ttl=${packet.ttl}"
-                )
+                Log.d(TAG, "Packet advertised → type=${packet.type} id=${packet.packetId}")
             }
 
             override fun onStartFailure(errorCode: Int) {
                 Log.e(TAG, "Advertise failed: $errorCode")
+                advertisingBusy = false
             }
         }
 
         advertiser?.startAdvertising(settings, data, callback)
 
         handler.postDelayed({
+
             stopAdvertising()
-        }, 800)
+
+        }, ADVERTISE_DURATION)
     }
 
-    /* ================= DATA MESSAGE ================= */
+    /* ================= SEND TO NODE ================= */
 
-    fun sendData(message: String) {
+    fun sendDataToNode(
+        message: String,
+        destNodeId: Int
+    ): MeshPacket? {
 
         if (!isSupported()) {
             Log.e(TAG, "BLE not supported")
-            return
+            return null
         }
 
-        val nodeId = MeshIdentity.getNodeId(context)
+        pauseHello()
 
-        val payloadBytes = message.toByteArray(Charsets.UTF_8)
+        val payloadBytes =
+            message.take(10).toByteArray(Charsets.UTF_8)
 
         val packet = MeshPacket(
             version = BLEConstants.PROTOCOL_VERSION,
             type = BLEConstants.PACKET_TYPE_DATA,
             packetId = packetCounter.incrementAndGet(),
-            srcNodeId = nodeId,
-            destNodeId = BLEConstants.BROADCAST_NODE_ID,
-            ttl = 3, // allow multi-hop
+            srcNodeId = selfNodeId,
+            destNodeId = destNodeId,
+            ttl = BLEConstants.DEFAULT_TTL,
             payload = payloadBytes
         )
 
-        Log.d(TAG, "Sending DATA: $message")
+        handler.postDelayed({
 
-        sendRawPacket(packet)
+            sendRawPacket(packet)
+
+            Log.d(TAG, "Sending DATA to node=$destNodeId")
+
+            handler.postDelayed({
+                resumeHello()
+            }, 2000)
+
+        }, 600)
+
+        return packet
     }
 
-    /* ================= STOP ================= */
+    fun sendBroadcast(message: String): MeshPacket? {
+
+        return sendDataToNode(
+            message,
+            BLEConstants.BROADCAST_NODE_ID
+        )
+    }
 
     private fun stopAdvertising() {
+
         try {
-            callback?.let { advertiser?.stopAdvertising(it) }
+            callback?.let {
+                advertiser?.stopAdvertising(it)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "stopAdvertising error: ${e.message}")
         } finally {
             callback = null
+            advertisingBusy = false
         }
     }
 }

@@ -2,44 +2,41 @@ package com.example.test
 
 import java.util.concurrent.ConcurrentHashMap
 
-class NeighborTable(
-    private val expiryMillis: Long = 30_000L // 30 seconds
-) {
+class NeighborTable {
 
-    private val neighbors = ConcurrentHashMap<Int, Neighbor>()
+    private val neighbors =
+        ConcurrentHashMap<Int, Neighbor>()
 
-    /** Add or update a neighbor */
-    fun update(nodeId: Int, address: String, rssi: Int) {
+    private val STALE_TIMEOUT = 15000L
+
+    fun update(
+        nodeId: Int,
+        address: String,
+        rssi: Int,
+        name: String
+    ) {
+
         neighbors[nodeId] = Neighbor(
             nodeId = nodeId,
             address = address,
             rssi = rssi,
+            name = name,
             lastSeen = System.currentTimeMillis()
         )
     }
 
-    /** Remove expired neighbors */
-    fun prune() {
-        val now = System.currentTimeMillis()
-        neighbors.entries.removeIf {
-            now - it.value.lastSeen > expiryMillis
-        }
-    }
-
-    /** Get active neighbors */
     fun getAll(): List<Neighbor> {
-        prune()
-        return neighbors.values.sortedByDescending { it.rssi }
+
+        val now = System.currentTimeMillis()
+
+        neighbors.entries.removeIf {
+            now - it.value.lastSeen > STALE_TIMEOUT
+        }
+
+        return neighbors.values.toList()
     }
 
-    /** Check if node is a neighbor */
-    fun contains(nodeId: Int): Boolean {
-        return neighbors.containsKey(nodeId)
-    }
-
-    /** Clear table */
-    fun clear() {
-        neighbors.clear()
+    fun get(nodeId: Int): Neighbor? {
+        return neighbors[nodeId]
     }
 }
-

@@ -1,6 +1,8 @@
 package com.example.test
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -29,7 +31,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val advertiser = BLEAdvertiser(this)
+        FileServer.startServer(this)
 
         val nodeId = MeshIdentity.getNodeId(this)
         Log.d("MESH", "My Node ID = ${nodeId.toString(16)}")
@@ -37,7 +39,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 Surface {
-                    DeviceDiscoveryScreen(advertiser = advertiser)
+                    DeviceDiscoveryScreen()
                 }
             }
         }
@@ -45,30 +47,58 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun DeviceDiscoveryScreen(
-    advertiser: BLEAdvertiser,
-    bleViewModel: BLEViewModel = viewModel(
-        factory = androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory(
-            LocalContext.current.applicationContext as android.app.Application
-        )
-    )
-) {
+fun DeviceDiscoveryScreen() {
+
+    val bleViewModel: BLEViewModel = viewModel()
 
     val context = LocalContext.current
-
     val devices by bleViewModel.devices.collectAsState()
-    val meshEvents by bleViewModel.meshEvents.collectAsState()
+    val receivedFile by bleViewModel.receivedFileUri.collectAsState()
 
-    /* -------- Permissions -------- */
+    var selectedNodeId by remember { mutableStateOf<Int?>(null) }
+    var permissionsGranted by remember { mutableStateOf(false) }
+
+    val filePickerLauncher =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri ->
+
+            if (uri != null && selectedNodeId != null) {
+
+                bleViewModel.setPendingFile(uri)
+                bleViewModel.startFileTransfer(selectedNodeId!!)
+
+                Toast.makeText(
+                    context,
+                    "Starting mesh transfer...",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
 
     val permissions = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+
             arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,
                 Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.BLUETOOTH_ADVERTISE
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.NEARBY_WIFI_DEVICES
             )
+
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+
+            arrayOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
+
         } else {
+
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
     }
@@ -76,66 +106,62 @@ fun DeviceDiscoveryScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        if (!result.values.all { it }) {
-            Toast.makeText(context, "BLE permissions required", Toast.LENGTH_SHORT).show()
-        }
+
+        permissionsGranted = result.values.all { it }
     }
 
     LaunchedEffect(Unit) {
         permissionLauncher.launch(permissions)
     }
 
-    /* -------- UI -------- */
-
     Scaffold(
+
         floatingActionButton = {
 
             Column {
 
                 ExtendedFloatingActionButton(
+
                     onClick = {
-                        advertiser.startHelloLoop()
-                        Toast.makeText(context, "HELLO loop started", Toast.LENGTH_SHORT).show()
+
+                        if (!permissionsGranted) return@ExtendedFloatingActionButton
+
+                        bleViewModel.startAdvertising()
+                        bleViewModel.startScan()
                     }
+
                 ) {
-                    Text("Advertise")
+
+                    Text("Advertise + Scan")
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
                 ExtendedFloatingActionButton(
-                    onClick = {
-                        if (!bleViewModel.isBluetoothEnabled()) {
-                            Toast.makeText(context, "Enable Bluetooth", Toast.LENGTH_SHORT).show()
-                            return@ExtendedFloatingActionButton
-                        }
-                        bleViewModel.startScan(300_000L)
-                    }
-                ) {
-                    Text("Scan")
-                }
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-                ExtendedFloatingActionButton(
                     onClick = {
-                        bleViewModel.sendMessage("Hi Mesh")
-                        Toast.makeText(context, "Message sent", Toast.LENGTH_SHORT).show()
+
+                        if (selectedNodeId == null) return@ExtendedFloatingActionButton
+
+                        filePickerLauncher.launch(arrayOf("*/*"))
                     }
+
                 ) {
-                    Text("Send Test Message")
+
+                    Text("Send File")
                 }
             }
         }
+
     ) { innerPadding ->
 
         Column(
+
             modifier = Modifier
                 .padding(innerPadding)
                 .padding(16.dp)
-        ) {
 
-            /* -------- Nearby Nodes -------- */
+        ) {
 
             Text(
                 text = "Nearby Mesh Nodes",
@@ -145,88 +171,59 @@ fun DeviceDiscoveryScreen(
             Spacer(modifier = Modifier.height(12.dp))
 
             if (devices.isEmpty()) {
+
                 Text(
-                    text = "No nodes found. Tap Scan.",
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    text = "No mesh devices discovered yet",
+                    fontSize = 14.sp
                 )
-            } else {
-                LazyColumn {
-                    items(devices, key = { it.address }) { device ->
-                        DeviceRow(device) {
-                            bleViewModel.stopScan()
-                            Toast.makeText(
-                                context,
-                                "Selected ${device.name}",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
+            }
+
+            LazyColumn {
+
+                items(devices, key = { it.address }) { device ->
+
+                    DeviceRow(device) {
+
+                        selectedNodeId = device.nodeId
+
+                        Toast.makeText(
+                            context,
+                            "Selected ${device.name}",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }
                 }
             }
 
-            /* -------- Mesh Activity -------- */
-
             Spacer(modifier = Modifier.height(20.dp))
 
-            Divider()
+            receivedFile?.let { uri ->
 
-            Spacer(modifier = Modifier.height(12.dp))
+                Card {
 
-            Text(
-                text = "Mesh Network Activity",
-                style = MaterialTheme.typography.titleMedium
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(250.dp)
-            ) {
-
-                items(meshEvents) { event ->
-
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
+                    Column(
+                        modifier = Modifier.padding(16.dp)
                     ) {
 
-                        Column(
-                            modifier = Modifier.padding(12.dp)
-                        ) {
+                        Text("📥 File received")
 
-                            Text(
-                                text = "Node: ${event.srcNodeId.toString(16)}",
-                                style = MaterialTheme.typography.labelLarge
-                            )
+                        Spacer(modifier = Modifier.height(8.dp))
 
-                            Spacer(Modifier.height(4.dp))
+                        Button(onClick = {
 
-                            Text(event.message)
+                            val intent = Intent(Intent.ACTION_VIEW)
+                            intent.setDataAndType(Uri.parse(uri), "image/*")
+                            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
-                            Spacer(Modifier.height(4.dp))
+                            context.startActivity(intent)
 
-                            Text("TTL: ${event.ttl}")
+                        }) {
+
+                            Text("Open")
                         }
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            /* -------- Graph Visualization -------- */
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(300.dp)
-                    .padding(bottom = 120.dp) // space for FABs
-            ) {
-                MeshGraphScreen(viewModel = bleViewModel)
-            }
-
         }
     }
 }
@@ -236,11 +233,14 @@ fun DeviceRow(
     device: ScannedDevice,
     onClick: (ScannedDevice) -> Unit
 ) {
+
     Row(
+
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick(device) }
             .padding(12.dp),
+
         verticalAlignment = Alignment.CenterVertically
     ) {
 
@@ -253,12 +253,20 @@ fun DeviceRow(
         Spacer(modifier = Modifier.width(12.dp))
 
         Column {
+
             Text(text = device.name ?: "MESH_NODE")
-            Text(text = device.address, fontSize = 12.sp)
+
+            Text(
+                text = device.address,
+                fontSize = 12.sp
+            )
         }
 
         Spacer(modifier = Modifier.weight(1f))
 
-        Text(text = "${device.rssi} dBm", fontSize = 12.sp)
+        Text(
+            text = "${device.rssi} dBm",
+            fontSize = 12.sp
+        )
     }
 }
