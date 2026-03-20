@@ -31,7 +31,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        FileServer.startServer(this)
+
 
         val nodeId = MeshIdentity.getNodeId(this)
         Log.d("MESH", "My Node ID = ${nodeId.toString(16)}")

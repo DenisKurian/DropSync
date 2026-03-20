@@ -17,9 +17,6 @@ class BLEAdvertiser(private val context: Context) {
         private const val ADVERTISE_DURATION = 800L
     }
 
-    private var helloPaused = false
-    private var advertisingBusy = false
-
     private val adapter: BluetoothAdapter? =
         context.getSystemService(BluetoothManager::class.java)?.adapter
 
@@ -29,25 +26,29 @@ class BLEAdvertiser(private val context: Context) {
     private val handler = Handler(Looper.getMainLooper())
 
     private var callback: AdvertiseCallback? = null
+
     private var helloRunning = false
+    private var helloPaused = false
+    private var advertisingBusy = false
 
     private val packetCounter = AtomicInteger(0)
 
     private val selfNodeId =
         MeshIdentity.getNodeId(context)
 
-    fun isSupported(): Boolean =
-        adapter != null &&
+    fun isSupported(): Boolean {
+        return adapter != null &&
                 adapter.isEnabled &&
                 adapter.isMultipleAdvertisementSupported &&
                 advertiser != null
+    }
 
     /* ================= HELLO LOOP ================= */
 
     fun startHelloLoop() {
 
         if (!isSupported()) {
-            Log.e(TAG, "BLE not supported")
+            Log.e(TAG, "BLE advertising not supported")
             return
         }
 
@@ -60,8 +61,12 @@ class BLEAdvertiser(private val context: Context) {
     }
 
     fun stopHelloLoop() {
+
         helloRunning = false
+        helloPaused = true
+
         handler.removeCallbacksAndMessages(null)
+
         stopAdvertising()
     }
 
@@ -102,7 +107,9 @@ class BLEAdvertiser(private val context: Context) {
     /* ================= HELLO CONTROL ================= */
 
     fun pauseHello() {
+
         helloPaused = true
+
         stopAdvertising()
     }
 
@@ -120,7 +127,11 @@ class BLEAdvertiser(private val context: Context) {
     fun sendRawPacket(packet: MeshPacket) {
 
         if (!isSupported()) return
-        if (advertisingBusy) return
+
+        if (advertisingBusy) {
+            Log.d(TAG, "Advertiser busy, skipping packet")
+            return
+        }
 
         advertisingBusy = true
 
@@ -150,11 +161,14 @@ class BLEAdvertiser(private val context: Context) {
         callback = object : AdvertiseCallback() {
 
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+
                 Log.d(TAG, "Packet advertised → type=${packet.type} id=${packet.packetId}")
             }
 
             override fun onStartFailure(errorCode: Int) {
+
                 Log.e(TAG, "Advertise failed: $errorCode")
+
                 advertisingBusy = false
             }
         }
@@ -168,7 +182,7 @@ class BLEAdvertiser(private val context: Context) {
         }, ADVERTISE_DURATION)
     }
 
-    /* ================= SEND TO NODE ================= */
+    /* ================= SEND DIRECT DATA ================= */
 
     fun sendDataToNode(
         message: String,
@@ -176,7 +190,7 @@ class BLEAdvertiser(private val context: Context) {
     ): MeshPacket? {
 
         if (!isSupported()) {
-            Log.e(TAG, "BLE not supported")
+            Log.e(TAG, "BLE advertising not supported")
             return null
         }
 
@@ -202,7 +216,9 @@ class BLEAdvertiser(private val context: Context) {
             Log.d(TAG, "Sending DATA to node=$destNodeId")
 
             handler.postDelayed({
+
                 resumeHello()
+
             }, 2000)
 
         }, 600)
@@ -218,17 +234,25 @@ class BLEAdvertiser(private val context: Context) {
         )
     }
 
+    /* ================= STOP ADVERTISING ================= */
+
     private fun stopAdvertising() {
 
         try {
+
             callback?.let {
                 advertiser?.stopAdvertising(it)
             }
+
         } catch (e: Exception) {
+
             Log.w(TAG, "stopAdvertising error: ${e.message}")
+
         } finally {
+
             callback = null
             advertisingBusy = false
         }
     }
 }
+

@@ -14,45 +14,33 @@ import java.util.concurrent.ConcurrentHashMap
 
 class BLEViewModel(application: Application) : AndroidViewModel(application) {
 
-
-    companion object { private const val TAG = "BLEViewModel" }
+    companion object {
+        private const val TAG = "BLEViewModel"
+    }
 
     private val neighborTable = NeighborTable()
     private val bleAdvertiser = BLEAdvertiser(application)
     private val selfNodeId = MeshIdentity.getNodeId(application)
-    private val wifiManager = WifiDirectManager(application)
+
+    private val wifi = WifiDirectController(application)
+
     private val seenPackets = ConcurrentHashMap<String, Long>()
-    private val _receivedFileUri = MutableStateFlow<String?>(null)
-
-    val receivedFileUri: StateFlow<String?> = _receivedFileUri
-    private var pendingFileUri: Uri? = null
-    private var wifiTransferStarted = false
-    init {
-
-        wifiManager.onConnected = { host ->
-            Log.d(TAG, "WiFi connected → preparing file send")
-            startWifiSendThread(host)
-        }
-
-        wifiManager.onGroupOwner = {
-            Log.d(TAG, "Device became GO → waiting for incoming file")
-        }
-
-        FileServer.onFileReceived = { uri ->
-
-            Log.d(TAG, "File received in ViewModel")
-
-            _receivedFileUri.value = uri
-        }
-    }
-    fun setPendingFile(uri: Uri) { pendingFileUri = uri }
 
     private val _devices = MutableStateFlow<List<ScannedDevice>>(emptyList())
     val devices: StateFlow<List<ScannedDevice>> = _devices
 
+    private val _receivedFileUri = MutableStateFlow<String?>(null)
+    val receivedFileUri: StateFlow<String?> = _receivedFileUri
+
+    private var pendingFileUri: Uri? = null
+
+    private var targetNodeId: Int? = null
+    private var isConnecting = false
+
     private val btManager = application.getSystemService(BluetoothManager::class.java)
     private val adapter = btManager?.adapter
     private val scanner = adapter?.bluetoothLeScanner
+
     private val handler = Handler(Looper.getMainLooper())
 
     private var scanning = false
@@ -60,132 +48,101 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
 
-        // When device becomes Wi-Fi Direct client (sender)
-        wifiManager.onConnected = { host ->
-            Log.d(TAG, "WiFi connected → preparing file send")
-            startWifiSendThread(host)
+        // 🔵 CLIENT SIDE
+        wifi.onConnected = { host ->
+
+            Log.d(TAG, "WiFi connected → sending file to $host")
+
+            pendingFileUri?.let { uri ->
+
+                Thread {
+
+                    val client = FileClient(getApplication())
+                    val success = client.sendFile(uri, host)
+
+                    Log.d(TAG, "File send result: $success")
+
+                    wifi.disconnect()
+                    isConnecting = false
+
+                }.start()
+            }
         }
 
-        // When device becomes Group Owner (receiver)
-        wifiManager.onGroupOwner = {
-            Log.d(TAG, "Device became GO → waiting for incoming file")
-            // DO NOTHING. FileServer is already running.
+        // 🟢 GO SIDE
+        wifi.onGroupOwner = {
+            Log.d(TAG, "Device became GO → waiting for file")
+        }
+
+        // 🟡 FILE RECEIVED
+        FileServer.onFileReceived = { uri ->
+            Log.d(TAG, "File received → $uri")
+            _receivedFileUri.value = uri
+        }
+
+        // 🔴 FIXED: no labeled return
+        wifi.onPeersAvailable = { peers ->
+
+            Log.d(TAG, "Peers available: ${peers.size}")
+
+            if (!isConnecting) {
+
+                val device = peers.firstOrNull()
+
+                if (device != null) {
+
+                    Log.d(TAG, "Connecting to peer: ${device.deviceName}")
+
+                    isConnecting = true
+                    wifi.connect(device)
+
+                } else {
+                    Log.d(TAG, "No peers found")
+                }
+
+            } else {
+                Log.d(TAG, "Already connecting, ignoring peers")
+            }
         }
     }
 
-    /* ================= ADVERTISE ================= */
+    fun setPendingFile(uri: Uri) {
+        pendingFileUri = uri
+    }
 
     fun startAdvertising() {
         bleAdvertiser.startHelloLoop()
     }
 
-    /* ================= FILE TRANSFER ================= */
-
     fun startFileTransfer(destNodeId: Int) {
 
-        wifiTransferStarted = false
+        targetNodeId = destNodeId
 
-        val requestId = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
+        Log.d(TAG, "Starting transfer to node: $destNodeId")
 
         val packet = MeshPacket(
             version = BLEConstants.PROTOCOL_VERSION,
             type = BLEConstants.PACKET_TYPE_FILE_REQUEST,
-            packetId = requestId,
+            packetId = (System.currentTimeMillis() % Int.MAX_VALUE).toInt(),
             srcNodeId = selfNodeId,
             destNodeId = destNodeId,
             ttl = BLEConstants.DEFAULT_TTL,
             payload = ByteArray(0)
         )
 
-        Log.d(TAG, "Starting route discovery to $destNodeId")
-
-        bleAdvertiser.pauseHello()
-
-        handler.postDelayed({
-
-            repeat(6) { i ->
-
-                handler.postDelayed({
-                    bleAdvertiser.sendRawPacket(packet)
-                    Log.d(TAG, "FILE_REQUEST advertised")
-                }, i * 700L)
-
-            }
+        repeat(5) {
 
             handler.postDelayed({
-                bleAdvertiser.resumeHello()
-            }, 5000)
 
-        }, 1000)
-    }
+                bleAdvertiser.sendRawPacket(packet)
 
-    /* ================= WIFI SEND ================= */
-
-    private fun startWifiSendThread(host: String) {
-
-        if (wifiTransferStarted) return
-        wifiTransferStarted = true
-
-        val uri = pendingFileUri
-
-        if (uri == null) {
-            Log.e(TAG, "pendingFileUri is NULL → cannot send file")
-            wifiTransferStarted = false
-            return
+            }, it * 600L)
         }
-
-        stopScan()
-        bleAdvertiser.pauseHello()
-
-        Thread {
-
-            try {
-
-                Thread.sleep(3000) // allow Wi-Fi network to stabilize
-
-                Log.d(TAG, "Starting file transfer to $host")
-
-                val client = FileClient(getApplication())
-                client.sendFile(uri, host)
-
-                Log.d(TAG, "FileClient finished sending")
-
-                pendingFileUri = null
-
-            } catch (e: Exception) {
-
-                Log.e(TAG, "File send error", e)
-
-            } finally {
-
-                try {
-                    wifiManager.disconnect()
-                } catch (e: Exception) {
-                    Log.e(TAG, "WiFi disconnect error", e)
-                }
-
-                handler.post {
-
-                    startScan()
-                    bleAdvertiser.resumeHello()
-
-                    wifiTransferStarted = false
-                }
-            }
-
-        }.start()
     }
-
-    /* ================= BLE SCANNING ================= */
 
     fun startScan() {
 
         if (scanning) return
-
-        if (adapter == null || !adapter.isEnabled) {
-            Log.w(TAG, "Bluetooth adapter not ready")
-            return
-        }
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
@@ -206,35 +163,27 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
 
                 if (packet.srcNodeId == selfNodeId) return
 
-                val key = "${packet.srcNodeId}_${packet.packetId}_${packet.type}"
-
-                if (seenPackets.containsKey(key)) return
-
-                seenPackets[key] = System.currentTimeMillis()
-
                 when (packet.type) {
 
                     BLEConstants.PACKET_TYPE_HELLO -> {
 
-                        val deviceName = packet.payload.toString(Charsets.UTF_8)
+                        val name = packet.payload.toString(Charsets.UTF_8)
 
                         neighborTable.update(
                             nodeId = packet.srcNodeId,
                             address = result.device.address ?: "",
                             rssi = result.rssi,
-                            name = deviceName
+                            name = name
                         )
 
                         updateUi()
-
-                        Log.d(TAG, "HELLO from $deviceName")
                     }
 
                     BLEConstants.PACKET_TYPE_FILE_REQUEST -> {
 
-                        Log.d(TAG, "FILE_REQUEST received")
-
                         if (packet.destNodeId == selfNodeId) {
+
+                            Log.d(TAG, "Received FILE_REQUEST → becoming GO")
 
                             val reply = MeshPacket(
                                 version = BLEConstants.PROTOCOL_VERSION,
@@ -248,22 +197,19 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
 
                             bleAdvertiser.sendRawPacket(reply)
 
-                            Log.d(TAG, "Sent ROUTE_REPLY")
-                            Log.d(TAG, "Receiver preparing WiFi Direct")
-
-                            wifiManager.createGroup()
+                            wifi.createGroup()
                         }
                     }
 
                     BLEConstants.PACKET_TYPE_ROUTE_REPLY -> {
 
-                        Log.d(TAG, "ROUTE_REPLY received")
-
                         if (packet.destNodeId == selfNodeId) {
 
-                            Log.d(TAG, "Route established → starting WiFi connection")
+                            Log.d(TAG, "Received ROUTE_REPLY → starting WiFi discovery")
 
-                            wifiManager.discoverAndConnect()
+                            handler.postDelayed({
+                                wifi.discoverPeers()
+                            }, 1500)
                         }
                     }
                 }
@@ -273,27 +219,11 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
         scanner?.startScan(listOf(filter), settings, scanCallback)
 
         scanning = true
-
-        Log.d(TAG, "BLE scanning started")
     }
-
-    fun stopScan() {
-
-        if (!scanning) return
-
-        scanCallback?.let { scanner?.stopScan(it) }
-
-        scanning = false
-        scanCallback = null
-
-        Log.d(TAG, "BLE scanning stopped")
-    }
-
-    /* ================= UI UPDATE ================= */
 
     private fun updateUi() {
 
-        val list = neighborTable.getAll().map {
+        _devices.value = neighborTable.getAll().map {
 
             ScannedDevice(
                 nodeId = it.nodeId,
@@ -302,8 +232,5 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
                 rssi = it.rssi
             )
         }
-
-        _devices.value = list
     }
-
 }
