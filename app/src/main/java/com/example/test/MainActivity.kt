@@ -2,6 +2,7 @@ package com.example.test
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -24,14 +25,42 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import java.io.File
+
+private fun requiredPermissionsForThisDevice(): Array<String> {
+    return when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
+            Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE,
+            Manifest.permission.NEARBY_WIFI_DEVICES
+        )
+
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> arrayOf(
+            Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        )
+
+        else -> arrayOf(
+            Manifest.permission.ACCESS_FINE_LOCATION
+        )
+    }
+}
+
+private fun hasAllRequiredPermissions(context: android.content.Context): Boolean {
+    return requiredPermissionsForThisDevice().all {
+        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+    }
+}
 
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-
 
         val nodeId = MeshIdentity.getNodeId(this)
         Log.d("MESH", "My Node ID = ${nodeId.toString(16)}")
@@ -56,111 +85,100 @@ fun DeviceDiscoveryScreen() {
     val receivedFile by bleViewModel.receivedFileUri.collectAsState()
 
     var selectedNodeId by remember { mutableStateOf<Int?>(null) }
-    var permissionsGranted by remember { mutableStateOf(false) }
 
     val filePickerLauncher =
         rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocument()
         ) { uri ->
+            if (!hasAllRequiredPermissions(context)) {
+                Toast.makeText(context, "Grant permissions first!", Toast.LENGTH_SHORT).show()
+                return@rememberLauncherForActivityResult
+            }
 
             if (uri != null && selectedNodeId != null) {
-
                 bleViewModel.setPendingFile(uri)
                 bleViewModel.startFileTransfer(selectedNodeId!!)
-
-                Toast.makeText(
-                    context,
-                    "Starting mesh transfer...",
-                    Toast.LENGTH_SHORT
-                ).show()
+                Toast.makeText(context, "Starting mesh transfer...", Toast.LENGTH_SHORT).show()
             }
         }
-
-    val permissions = remember {
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-
-            arrayOf(
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.BLUETOOTH_ADVERTISE,
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.NEARBY_WIFI_DEVICES
-            )
-
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-
-            arrayOf(
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.BLUETOOTH_ADVERTISE,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            )
-
-        } else {
-
-            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
+        val granted = hasAllRequiredPermissions(context)
 
-        permissionsGranted = result.values.all { it }
+        Log.d("PERMISSION", "Result = $result")
+        Log.d("PERMISSION", "Final status = $granted")
+
+        if (!granted) {
+            Toast.makeText(context, "Permissions NOT granted!", Toast.LENGTH_LONG).show()
+        }
     }
 
     LaunchedEffect(Unit) {
-        permissionLauncher.launch(permissions)
+        val missing = requiredPermissionsForThisDevice().filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
+        }
     }
 
     Scaffold(
-
         floatingActionButton = {
-
             Column {
-
                 ExtendedFloatingActionButton(
-
                     onClick = {
+                        val missing = requiredPermissionsForThisDevice().filter {
+                            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+                        }
 
-                        if (!permissionsGranted) return@ExtendedFloatingActionButton
+                        if (missing.isNotEmpty()) {
+                            Toast.makeText(context, "Grant permissions first!", Toast.LENGTH_SHORT).show()
+                            permissionLauncher.launch(missing.toTypedArray())
+                            return@ExtendedFloatingActionButton
+                        }
 
                         bleViewModel.startAdvertising()
                         bleViewModel.startScan()
                     }
-
                 ) {
-
                     Text("Advertise + Scan")
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
                 ExtendedFloatingActionButton(
-
                     onClick = {
+                        val missing = requiredPermissionsForThisDevice().filter {
+                            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+                        }
 
-                        if (selectedNodeId == null) return@ExtendedFloatingActionButton
+                        if (missing.isNotEmpty()) {
+                            Toast.makeText(context, "Grant permissions first!", Toast.LENGTH_SHORT).show()
+                            permissionLauncher.launch(missing.toTypedArray())
+                            return@ExtendedFloatingActionButton
+                        }
+
+                        if (selectedNodeId == null) {
+                            Toast.makeText(context, "Select a device first", Toast.LENGTH_SHORT).show()
+                            return@ExtendedFloatingActionButton
+                        }
 
                         filePickerLauncher.launch(arrayOf("*/*"))
                     }
-
                 ) {
-
                     Text("Send File")
                 }
             }
         }
-
     ) { innerPadding ->
 
         Column(
-
             modifier = Modifier
                 .padding(innerPadding)
                 .padding(16.dp)
-
         ) {
 
             Text(
@@ -171,7 +189,6 @@ fun DeviceDiscoveryScreen() {
             Spacer(modifier = Modifier.height(12.dp))
 
             if (devices.isEmpty()) {
-
                 Text(
                     text = "No mesh devices discovered yet",
                     fontSize = 14.sp
@@ -179,13 +196,9 @@ fun DeviceDiscoveryScreen() {
             }
 
             LazyColumn {
-
                 items(devices, key = { it.address }) { device ->
-
                     DeviceRow(device) {
-
                         selectedNodeId = device.nodeId
-
                         Toast.makeText(
                             context,
                             "Selected ${device.name}",
@@ -198,31 +211,36 @@ fun DeviceDiscoveryScreen() {
             Spacer(modifier = Modifier.height(20.dp))
 
             receivedFile?.let { uri ->
-
                 Card {
-
                     Column(
                         modifier = Modifier.padding(16.dp)
                     ) {
-
                         Text("📥 File received")
-
                         Spacer(modifier = Modifier.height(8.dp))
-
+                        Text(text = uri, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
                         Button(onClick = {
-
-                            val intent = Intent(Intent.ACTION_VIEW)
-                            intent.setDataAndType(Uri.parse(uri), "image/*")
-                            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-
+                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(Uri.parse(uri), "*/*")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
                             context.startActivity(intent)
-
                         }) {
-
                             Text("Open")
                         }
                     }
                 }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Button(onClick = {
+                val baseDir = context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS)
+                val meshDir = File(baseDir, "MeshDrop")
+                val list = meshDir.listFiles()?.toList().orEmpty()
+                Toast.makeText(context, "Saved files: ${list.size}", Toast.LENGTH_SHORT).show()
+            }) {
+                Text("Check Saved Files")
             }
         }
     }
@@ -233,17 +251,13 @@ fun DeviceRow(
     device: ScannedDevice,
     onClick: (ScannedDevice) -> Unit
 ) {
-
     Row(
-
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick(device) }
             .padding(12.dp),
-
         verticalAlignment = Alignment.CenterVertically
     ) {
-
         Image(
             painter = painterResource(id = R.drawable.avatar),
             contentDescription = null,
@@ -253,9 +267,7 @@ fun DeviceRow(
         Spacer(modifier = Modifier.width(12.dp))
 
         Column {
-
             Text(text = device.name ?: "MESH_NODE")
-
             Text(
                 text = device.address,
                 fontSize = 12.sp

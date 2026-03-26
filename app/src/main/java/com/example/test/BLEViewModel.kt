@@ -10,7 +10,6 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import java.util.concurrent.ConcurrentHashMap
 
 class BLEViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -18,13 +17,18 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
         private const val TAG = "BLEViewModel"
     }
 
+    private enum class TransferState {
+        IDLE,
+        WAITING_FOR_REPLY,
+        CONNECTING_WIFI,
+        SENDING,
+        RECEIVING
+    }
+
     private val neighborTable = NeighborTable()
     private val bleAdvertiser = BLEAdvertiser(application)
     private val selfNodeId = MeshIdentity.getNodeId(application)
-
     private val wifi = WifiDirectController(application)
-
-    private val seenPackets = ConcurrentHashMap<String, Long>()
 
     private val _devices = MutableStateFlow<List<ScannedDevice>>(emptyList())
     val devices: StateFlow<List<ScannedDevice>> = _devices
@@ -33,9 +37,11 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
     val receivedFileUri: StateFlow<String?> = _receivedFileUri
 
     private var pendingFileUri: Uri? = null
-
     private var targetNodeId: Int? = null
+
+    private var state = TransferState.IDLE
     private var isConnecting = false
+    private var groupCreated = false
 
     private val btManager = application.getSystemService(BluetoothManager::class.java)
     private val adapter = btManager?.adapter
@@ -44,66 +50,69 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
     private val handler = Handler(Looper.getMainLooper())
 
     private var scanning = false
-    private var scanCallback: ScanCallback? = null
 
     init {
 
-        // 🔵 CLIENT SIDE
         wifi.onConnected = { host ->
+            if (state == TransferState.CONNECTING_WIFI || state == TransferState.SENDING) {
+                Log.d(TAG, "WiFi connected → sending file to $host")
+                state = TransferState.SENDING
 
-            Log.d(TAG, "WiFi connected → sending file to $host")
+                pendingFileUri?.let { uri ->
+                    Thread {
+                        val success = FileClient(getApplication()).sendFile(uri, host)
+                        Log.d(TAG, "File send result: $success")
 
-            pendingFileUri?.let { uri ->
-
-                Thread {
-
-                    val client = FileClient(getApplication())
-                    val success = client.sendFile(uri, host)
-
-                    Log.d(TAG, "File send result: $success")
-
+                        wifi.disconnect()
+                        resetTransferState()
+                    }.start()
+                } ?: run {
+                    Log.e(TAG, "No pending file URI set")
                     wifi.disconnect()
-                    isConnecting = false
-
-                }.start()
+                    resetTransferState()
+                }
+            } else {
+                Log.d(TAG, "Ignoring onConnected in state=$state")
             }
         }
 
-        // 🟢 GO SIDE
         wifi.onGroupOwner = {
             Log.d(TAG, "Device became GO → waiting for file")
+            state = TransferState.RECEIVING
         }
 
-        // 🟡 FILE RECEIVED
         FileServer.onFileReceived = { uri ->
             Log.d(TAG, "File received → $uri")
             _receivedFileUri.value = uri
+
+            wifi.disconnect()
+            resetTransferState()
         }
 
-        // 🔴 FIXED: no labeled return
         wifi.onPeersAvailable = { peers ->
-
             Log.d(TAG, "Peers available: ${peers.size}")
 
-            if (!isConnecting) {
-
-                val device = peers.firstOrNull()
-
-                if (device != null) {
-
-                    Log.d(TAG, "Connecting to peer: ${device.deviceName}")
-
+            if (state == TransferState.CONNECTING_WIFI && !isConnecting) {
+                if (peers.isNotEmpty()) {
+                    val device = peers.first()
+                    Log.d(TAG, "Connecting to: ${device.deviceName}")
                     isConnecting = true
                     wifi.connect(device)
-
                 } else {
                     Log.d(TAG, "No peers found")
                 }
-
             } else {
-                Log.d(TAG, "Already connecting, ignoring peers")
+                Log.d(TAG, "Ignoring peers in state=$state isConnecting=$isConnecting")
             }
         }
+    }
+
+    private fun resetTransferState() {
+        state = TransferState.IDLE
+        isConnecting = false
+        groupCreated = false
+        targetNodeId = null
+        bleAdvertiser.resumeHello()
     }
 
     fun setPendingFile(uri: Uri) {
@@ -115,8 +124,16 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startFileTransfer(destNodeId: Int) {
+        if (state != TransferState.IDLE) {
+            Log.d(TAG, "Transfer already in progress")
+            return
+        }
+
+        wifi.disconnect()
+        bleAdvertiser.pauseHello()
 
         targetNodeId = destNodeId
+        state = TransferState.WAITING_FOR_REPLY
 
         Log.d(TAG, "Starting transfer to node: $destNodeId")
 
@@ -127,21 +144,17 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
             srcNodeId = selfNodeId,
             destNodeId = destNodeId,
             ttl = BLEConstants.DEFAULT_TTL,
-            payload = ByteArray(0)
+            payload = byteArrayOf()
         )
 
-        repeat(5) {
-
+        repeat(3) { index ->
             handler.postDelayed({
-
                 bleAdvertiser.sendRawPacket(packet)
-
-            }, it * 600L)
+            }, index * 900L)
         }
     }
 
     fun startScan() {
-
         if (scanning) return
 
         val settings = ScanSettings.Builder()
@@ -152,13 +165,11 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
             .setManufacturerData(BLEConstants.MANUFACTURER_ID, byteArrayOf())
             .build()
 
-        scanCallback = object : ScanCallback() {
+        val callback = object : ScanCallback() {
 
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-
                 val record = result.scanRecord ?: return
                 val data = record.manufacturerSpecificData[BLEConstants.MANUFACTURER_ID] ?: return
-
                 val packet = MeshPacket.fromBytes(data) ?: return
 
                 if (packet.srcNodeId == selfNodeId) return
@@ -166,7 +177,6 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
                 when (packet.type) {
 
                     BLEConstants.PACKET_TYPE_HELLO -> {
-
                         val name = packet.payload.toString(Charsets.UTF_8)
 
                         neighborTable.update(
@@ -180,10 +190,12 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
                     }
 
                     BLEConstants.PACKET_TYPE_FILE_REQUEST -> {
+                        if (packet.destNodeId == selfNodeId && state == TransferState.IDLE && !groupCreated) {
+                            Log.d(TAG, "FILE_REQUEST → becoming GO")
 
-                        if (packet.destNodeId == selfNodeId) {
-
-                            Log.d(TAG, "Received FILE_REQUEST → becoming GO")
+                            groupCreated = true
+                            state = TransferState.RECEIVING
+                            bleAdvertiser.pauseHello()
 
                             val reply = MeshPacket(
                                 version = BLEConstants.PROTOCOL_VERSION,
@@ -192,39 +204,39 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
                                 srcNodeId = selfNodeId,
                                 destNodeId = packet.srcNodeId,
                                 ttl = BLEConstants.DEFAULT_TTL,
-                                payload = ByteArray(0)
+                                payload = byteArrayOf()
                             )
 
-                            bleAdvertiser.sendRawPacket(reply)
+                            repeat(3) { index ->
+                                handler.postDelayed({
+                                    bleAdvertiser.sendRawPacket(reply)
+                                }, index * 900L)
+                            }
 
                             wifi.createGroup()
                         }
                     }
 
                     BLEConstants.PACKET_TYPE_ROUTE_REPLY -> {
+                        if (packet.destNodeId == selfNodeId && state == TransferState.WAITING_FOR_REPLY) {
+                            Log.d(TAG, "ROUTE_REPLY → discovering peers")
 
-                        if (packet.destNodeId == selfNodeId) {
-
-                            Log.d(TAG, "Received ROUTE_REPLY → starting WiFi discovery")
-
+                            state = TransferState.CONNECTING_WIFI
                             handler.postDelayed({
                                 wifi.discoverPeers()
-                            }, 1500)
+                            }, 1200)
                         }
                     }
                 }
             }
         }
 
-        scanner?.startScan(listOf(filter), settings, scanCallback)
-
+        scanner?.startScan(listOf(filter), settings, callback)
         scanning = true
     }
 
     private fun updateUi() {
-
         _devices.value = neighborTable.getAll().map {
-
             ScannedDevice(
                 nodeId = it.nodeId,
                 address = it.address,

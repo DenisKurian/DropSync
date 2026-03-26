@@ -17,15 +17,16 @@ class WifiDirectController(private val context: Context) {
     val channel =
         manager.initialize(context, context.mainLooper, null)
 
-    // Callbacks
     var onConnected: ((String) -> Unit)? = null
     var onGroupOwner: (() -> Unit)? = null
     var onPeersAvailable: ((Collection<WifiP2pDevice>) -> Unit)? = null
 
     private val receiver = WifiDirectReceiver(manager, channel, this)
 
-    init {
+    private var discovering = false
+    private var connecting = false
 
+    init {
         val filter = IntentFilter().apply {
             addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
             addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
@@ -35,11 +36,9 @@ class WifiDirectController(private val context: Context) {
     }
 
     fun createGroup() {
-
         Log.d(TAG, "Creating group")
 
         manager.createGroup(channel, object : WifiP2pManager.ActionListener {
-
             override fun onSuccess() {
                 Log.d(TAG, "Group creation started")
             }
@@ -51,60 +50,74 @@ class WifiDirectController(private val context: Context) {
     }
 
     fun discoverPeers() {
+        if (discovering) {
+            Log.d(TAG, "Already discovering, skipping")
+            return
+        }
+
+        discovering = true
 
         Log.d(TAG, "Starting peer discovery")
 
         manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
-
             override fun onSuccess() {
                 Log.d(TAG, "Peer discovery started")
             }
 
             override fun onFailure(reason: Int) {
                 Log.e(TAG, "discoverPeers failed $reason")
+                discovering = false
             }
         })
     }
 
     fun requestPeers() {
-
         manager.requestPeers(channel) { peers ->
+            discovering = false
             Log.d(TAG, "Peers found: ${peers.deviceList.size}")
             onPeersAvailable?.invoke(peers.deviceList)
         }
     }
 
     fun connect(device: WifiP2pDevice) {
+        if (connecting) {
+            Log.d(TAG, "Already connecting, skipping")
+            return
+        }
+
+        connecting = true
 
         Log.d(TAG, "Connecting to ${device.deviceName} (${device.deviceAddress})")
 
         val config = WifiP2pConfig().apply {
             deviceAddress = device.deviceAddress
-
-            // 0 = prefer client, 15 = prefer GO
             groupOwnerIntent = 0
         }
 
         manager.connect(channel, config, object : WifiP2pManager.ActionListener {
-
             override fun onSuccess() {
                 Log.d(TAG, "Connection initiated")
             }
 
             override fun onFailure(reason: Int) {
                 Log.e(TAG, "connect failed $reason")
+                connecting = false
             }
         })
     }
 
-    fun disconnect() {
+    fun onConnectionEstablished() {
+        connecting = false
+    }
 
+    fun disconnect() {
         Log.d(TAG, "Disconnecting / removing group")
 
         manager.removeGroup(channel, object : WifiP2pManager.ActionListener {
-
             override fun onSuccess() {
                 Log.d(TAG, "Group removed")
+                connecting = false
+                discovering = false
             }
 
             override fun onFailure(reason: Int) {
