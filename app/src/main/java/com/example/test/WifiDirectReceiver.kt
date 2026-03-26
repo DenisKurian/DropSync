@@ -32,27 +32,28 @@ class WifiDirectReceiver(
                     Log.d(TAG, "WiFi Direct connected")
 
                     manager.requestConnectionInfo(channel) { info ->
-                        if (info.groupFormed) {
-                            val host = info.groupOwnerAddress.hostAddress
-
-                            controller.onConnectionEstablished()
-
-                            if (info.isGroupOwner) {
-                                Log.d(TAG, "I am GROUP OWNER → starting server")
-                                FileServer.startServer(context)
-                                controller.onGroupOwner?.invoke()
-                            } else {
-                                Log.d(TAG, "Connected as CLIENT to GO: $host")
-                                handler.postDelayed({
-                                    controller.onConnected?.invoke(host)
-                                }, 1200)
-                            }
-                        } else {
+                        if (!info.groupFormed) {
                             Log.d(TAG, "Group not formed yet")
+                            return@requestConnectionInfo
+                        }
+
+                        val host = info.groupOwnerAddress.hostAddress
+                        controller.markConnected()
+
+                        if (info.isGroupOwner) {
+                            Log.d(TAG, "I am GROUP OWNER → starting server")
+                            FileServer.startServer(context)
+                            controller.onGroupOwner?.invoke()
+                        } else {
+                            Log.d(TAG, "Connected as CLIENT to GO: $host")
+
+                            handler.postDelayed({
+                                controller.onConnected?.invoke(host)
+                            }, 1200L)
                         }
                     }
                 } else {
-                    Log.d(TAG, "WiFi Direct disconnected")
+                    Log.d(TAG, "WiFi Direct disconnected (native intent)")
                 }
             }
 

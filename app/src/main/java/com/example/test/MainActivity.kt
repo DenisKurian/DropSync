@@ -221,7 +221,9 @@ fun DeviceDiscoveryScreen() {
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(onClick = {
                             val intent = Intent(Intent.ACTION_VIEW).apply {
-                                setDataAndType(Uri.parse(uri), "*/*")
+                                val parsedUri = Uri.parse(uri)
+                                val resolvedMime = context.contentResolver.getType(parsedUri) ?: "*/*"
+                                setDataAndType(parsedUri, resolvedMime)
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
                             context.startActivity(intent)
@@ -235,12 +237,23 @@ fun DeviceDiscoveryScreen() {
             Spacer(modifier = Modifier.height(16.dp))
 
             Button(onClick = {
-                val baseDir = context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS)
-                val meshDir = File(baseDir, "MeshDrop")
-                val list = meshDir.listFiles()?.toList().orEmpty()
-                Toast.makeText(context, "Saved files: ${list.size}", Toast.LENGTH_SHORT).show()
+                try {
+                    val picsDir = File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_PICTURES), "MeshShare")
+                    val docsDir = File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "MeshShare")
+                    val picsCount = picsDir.listFiles()?.size ?: 0
+                    val docsCount = docsDir.listFiles()?.size ?: 0
+                    val total = picsCount + docsCount
+                    
+                    if (total > 0) {
+                        Toast.makeText(context, "Saved Successfully! \\nPictures/MeshShare: $picsCount items\\nDownloads/MeshShare: $docsCount items", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(context, "No files found yet in public directories.", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Storage folder generated but scanning requires external file manager.", Toast.LENGTH_SHORT).show()
+                }
             }) {
-                Text("Check Saved Files")
+                Text("Check Saved Files (Storage)")
             }
         }
     }

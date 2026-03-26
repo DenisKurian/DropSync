@@ -2,7 +2,10 @@ package com.example.test
 
 import android.app.Application
 import android.bluetooth.BluetoothManager
-import android.bluetooth.le.*
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -10,19 +13,24 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import java.util.concurrent.ConcurrentHashMap
 
 class BLEViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "BLEViewModel"
+        private const val RETRY_DELAY_MS = 3000L
+        private const val GENERAL_TIMEOUT_MS = 45000L // 45 seconds to escape deadlocks
     }
 
     private enum class TransferState {
         IDLE,
         WAITING_FOR_REPLY,
         CONNECTING_WIFI,
+        CREATING_GROUP,
+        RECEIVING,
         SENDING,
-        RECEIVING
+        DISCONNECTING
     }
 
     private val neighborTable = NeighborTable()
@@ -41,52 +49,78 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
 
     private var state = TransferState.IDLE
     private var isConnecting = false
-    private var groupCreated = false
 
     private val btManager = application.getSystemService(BluetoothManager::class.java)
     private val adapter = btManager?.adapter
     private val scanner = adapter?.bluetoothLeScanner
 
     private val handler = Handler(Looper.getMainLooper())
+    private val timeoutRunnable = Runnable { handleTimeout() }
 
     private var scanning = false
 
     init {
 
         wifi.onConnected = { host ->
-            if (state == TransferState.CONNECTING_WIFI || state == TransferState.SENDING) {
-                Log.d(TAG, "WiFi connected → sending file to $host")
-                state = TransferState.SENDING
+            Log.d(TAG, "WiFi connected callback in state=$state to host: $host")
 
-                pendingFileUri?.let { uri ->
-                    Thread {
-                        val success = FileClient(getApplication()).sendFile(uri, host)
+            val uri = pendingFileUri
+            if (uri != null && state == TransferState.CONNECTING_WIFI) {
+                state = TransferState.SENDING
+                scheduleTimeout()
+
+                Thread {
+                    try {
+                        Log.d(TAG, "WiFi connected → Client starting file send to $host")
+
+                        val client = FileClient(getApplication())
+                        val success = client.sendFile(uri, host)
+
                         Log.d(TAG, "File send result: $success")
 
-                        wifi.disconnect()
-                        resetTransferState()
-                    }.start()
-                } ?: run {
-                    Log.e(TAG, "No pending file URI set")
-                    wifi.disconnect()
-                    resetTransferState()
-                }
+                    } catch(e: Exception) {
+                        Log.e(TAG, "Failed to send file", e)
+                    } finally {
+                        Log.d(TAG, "File send workflow complete. Delaying teardown by 3000ms to ensure OS Kernel TCP RAM buffers fully drain over the physical radio interface.")
+                        pendingFileUri = null
+                        handler.postDelayed({ finishTransferAndTearDown() }, 3000L)
+                    }
+                }.start()
             } else {
-                Log.d(TAG, "Ignoring onConnected in state=$state")
+                Log.d(TAG, "Ignoring onConnected because no pending file URI exists or state is wrong")
             }
         }
 
         wifi.onGroupOwner = {
-            Log.d(TAG, "Device became GO → waiting for file")
+            Log.d(TAG, "Device became GO → Waiting for FileClient to connect")
             state = TransferState.RECEIVING
+            scheduleTimeout()
+            
+            // Ensure server is started up and listening when GO group activates
+            FileServer.startServer(getApplication())
+        }
+
+        wifi.onDisconnected = {
+            Log.d(TAG, "WiFi disconnected callback triggered")
+            if (state == TransferState.DISCONNECTING) {
+                resetWorkflow()
+            }
+        }
+
+        wifi.onConnectionFailed = {
+            Log.d(TAG, "WiFi connection failed callback")
+            finishTransferAndTearDown()
         }
 
         FileServer.onFileReceived = { uri ->
-            Log.d(TAG, "File received → $uri")
-            _receivedFileUri.value = uri
-
-            wifi.disconnect()
-            resetTransferState()
+            Log.d(TAG, "File received cleanly → $uri")
+            handler.post {
+                _receivedFileUri.value = uri
+            }
+            
+            handler.postDelayed({
+                finishTransferAndTearDown()
+            }, 1000L) 
         }
 
         wifi.onPeersAvailable = { peers ->
@@ -107,11 +141,40 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun resetTransferState() {
+    private fun scheduleTimeout() {
+        handler.removeCallbacks(timeoutRunnable)
+        handler.postDelayed(timeoutRunnable, GENERAL_TIMEOUT_MS)
+    }
+
+    private fun handleTimeout() {
+        if (state != TransferState.IDLE && state != TransferState.DISCONNECTING) {
+            Log.e(TAG, "Operation Timed Out! State was stuck at $state for $GENERAL_TIMEOUT_MS ms. Tearing down.")
+            finishTransferAndTearDown()
+        }
+    }
+
+    private fun finishTransferAndTearDown() {
+        handler.removeCallbacks(timeoutRunnable)
+        if (state == TransferState.DISCONNECTING) return
+        state = TransferState.DISCONNECTING
+        Log.d(TAG, "finishTransferAndTearDown - Stop Server and Disconnect WiFi Direct")
+        FileServer.stopServer()
+        wifi.disconnect()
+        
+        handler.postDelayed({
+            if (state == TransferState.DISCONNECTING) resetWorkflow()
+        }, 3000L)
+    }
+
+    private fun resetWorkflow() {
+        Log.d(TAG, "Workflow completely reset. Ready for next transfer.")
+        handler.removeCallbacks(timeoutRunnable)
         state = TransferState.IDLE
         isConnecting = false
-        groupCreated = false
         targetNodeId = null
+        wifi.resetState()
+        FileServer.stopServer()
+        pendingFileUri = null
         bleAdvertiser.resumeHello()
     }
 
@@ -124,18 +187,31 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startFileTransfer(destNodeId: Int) {
-        if (state != TransferState.IDLE) {
-            Log.d(TAG, "Transfer already in progress")
+        if (!wifi.isReady() || state != TransferState.IDLE) {
+            Log.d(TAG, "WiFi Direct not ready yet or busy (state=$state). Retrying transfer to node: $destNodeId")
+
+            // Aggressive teardown request if stuck
+            if (state != TransferState.IDLE && !wifi.isReady()) {
+               wifi.disconnect()
+            } else if (state != TransferState.IDLE) {
+               Log.e(TAG, "Force resetting workflow because we are stuck in $state")
+               resetWorkflow() 
+            }
+
+            handler.postDelayed({
+                startFileTransfer(destNodeId)
+            }, RETRY_DELAY_MS)
+
             return
         }
 
-        wifi.disconnect()
-        bleAdvertiser.pauseHello()
-
         targetNodeId = destNodeId
         state = TransferState.WAITING_FOR_REPLY
+        scheduleTimeout()
 
         Log.d(TAG, "Starting transfer to node: $destNodeId")
+
+        bleAdvertiser.pauseHello()
 
         val packet = MeshPacket(
             version = BLEConstants.PROTOCOL_VERSION,
@@ -155,6 +231,7 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startScan() {
+
         if (scanning) return
 
         val settings = ScanSettings.Builder()
@@ -168,6 +245,7 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
         val callback = object : ScanCallback() {
 
             override fun onScanResult(callbackType: Int, result: ScanResult) {
+
                 val record = result.scanRecord ?: return
                 val data = record.manufacturerSpecificData[BLEConstants.MANUFACTURER_ID] ?: return
                 val packet = MeshPacket.fromBytes(data) ?: return
@@ -190,11 +268,11 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
                     }
 
                     BLEConstants.PACKET_TYPE_FILE_REQUEST -> {
-                        if (packet.destNodeId == selfNodeId && state == TransferState.IDLE && !groupCreated) {
+                        if (packet.destNodeId == selfNodeId && state == TransferState.IDLE) {
                             Log.d(TAG, "FILE_REQUEST → becoming GO")
 
-                            groupCreated = true
-                            state = TransferState.RECEIVING
+                            state = TransferState.CREATING_GROUP
+                            scheduleTimeout()
                             bleAdvertiser.pauseHello()
 
                             val reply = MeshPacket(
@@ -213,18 +291,21 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
                                 }, index * 900L)
                             }
 
-                            wifi.createGroup()
+                            handler.postDelayed({
+                                wifi.createGroup()
+                            }, 500L)
                         }
                     }
 
                     BLEConstants.PACKET_TYPE_ROUTE_REPLY -> {
                         if (packet.destNodeId == selfNodeId && state == TransferState.WAITING_FOR_REPLY) {
-                            Log.d(TAG, "ROUTE_REPLY → discovering peers")
-
+                            Log.d(TAG, "ROUTE_REPLY received → discovering peers")
                             state = TransferState.CONNECTING_WIFI
+                            scheduleTimeout()
+
                             handler.postDelayed({
                                 wifi.discoverPeers()
-                            }, 1200)
+                            }, 2800L) 
                         }
                     }
                 }
