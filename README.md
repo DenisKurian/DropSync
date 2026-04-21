@@ -2,7 +2,7 @@
 # ⚡ DropSync
 **A Secure, High-Speed Peer-to-Peer File Sharing App for Android**
 
-[![Download APK](https://img.shields.io/badge/Download-Release_APK-00C853?style=for-the-badge&logo=android&logoColor=white)]([https://github.com/DenisKurian/DropSync/releases/download/v1.0.0/app-release.apk])
+[![Download APK](https://img.shields.io/badge/Download-Release_APK-00C853?style=for-the-badge&logo=android&logoColor=white)] https://github.com/DenisKurian/DropSync/releases/download/v1.0.0/app-release.apk
 
 DropSync is a robust peer-to-peer file transfer system engineered to securely send files across devices without relying on an active internet connection. It utilizes Bluetooth Low Energy (BLE) for seamless device discovery and WiFi Direct for high-speed data transmission.
 
