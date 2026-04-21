@@ -62,10 +62,10 @@ object FileServer {
                             continue
                         }
 
-                        // 2. Save byte stream to temp file first to ensure full receipt
+                        // 2. Read fully, decrypt, then save to temp file
                         val tempFile = File(context.cacheDir, "temp_$displayName")
-                        val output = FileOutputStream(tempFile)
 
+                        val baos = java.io.ByteArrayOutputStream()
                         val buffer = ByteArray(8192)
                         var remaining = fileSize
                         var totalRead = 0L
@@ -76,15 +76,13 @@ object FileServer {
                                 val read = dataInput.read(buffer, 0, toRead)
                                 if (read == -1) break
                                 
-                                output.write(buffer, 0, read)
+                                baos.write(buffer, 0, read)
                                 totalRead += read
                                 remaining -= read
                             }
                         } catch (e: Exception) {
                             Log.w(TAG, "Socket stream broken forcefully by sender (totalRead=$totalRead). Continuing gracefully...")
                         } finally {
-                            try { output.flush() } catch (e: Exception) {}
-                            try { output.close() } catch (e: Exception) {}
                             try { client.close() } catch (e: Exception) {}
                         }
 
@@ -93,6 +91,14 @@ object FileServer {
                             tempFile.delete()
                             continue
                         }
+
+                        val receivedBytes = baos.toByteArray()
+                        val decryptedBytes = EncryptionUtil.decryptFile(receivedBytes)
+                        
+                        val output = FileOutputStream(tempFile)
+                        output.write(decryptedBytes)
+                        output.flush()
+                        output.close()
 
                         Log.d(TAG, "File fully saved temporarily: ${tempFile.absolutePath}")
 

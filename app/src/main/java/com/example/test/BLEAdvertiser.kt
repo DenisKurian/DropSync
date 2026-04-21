@@ -197,7 +197,7 @@ class BLEAdvertiser(private val context: Context) {
         pauseHello()
 
         val payloadBytes =
-            message.take(10).toByteArray(Charsets.UTF_8)
+            message.toByteArray(Charsets.UTF_8).take(BLEConstants.MAX_PAYLOAD_SIZE).toByteArray()
 
         val packet = MeshPacket(
             version = BLEConstants.PROTOCOL_VERSION,

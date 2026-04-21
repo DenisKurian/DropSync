@@ -37,7 +37,7 @@ object BLEConstants {
     /* ================= Payload ================= */
 
     // Reduced for BLE advertisement safety
-    const val MAX_PAYLOAD_SIZE = 12
+    const val MAX_PAYLOAD_SIZE = 64
 
     const val MAX_PACKET_SIZE = HEADER_SIZE + MAX_PAYLOAD_SIZE
 

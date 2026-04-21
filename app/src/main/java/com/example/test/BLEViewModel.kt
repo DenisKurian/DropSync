@@ -6,6 +6,7 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.Context
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -44,6 +45,16 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
     private val _receivedFileUri = MutableStateFlow<String?>(null)
     val receivedFileUri: StateFlow<String?> = _receivedFileUri
 
+    private val prefs = application.getSharedPreferences("mesh_contacts", Context.MODE_PRIVATE)
+
+    private val _savedDevices = MutableStateFlow<List<ScannedDevice>>(emptyList())
+    val savedDevices: StateFlow<List<ScannedDevice>> = _savedDevices
+
+    private val _receivedMessages = MutableStateFlow<List<String>>(emptyList())
+    val receivedMessages: StateFlow<List<String>> = _receivedMessages
+
+    private val seenMessageIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<Int, Boolean>())
+
     private var pendingFileUri: Uri? = null
     private var targetNodeId: Int? = null
 
@@ -60,6 +71,7 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
     private var scanning = false
 
     init {
+        loadSavedDevices()
 
         wifi.onConnected = { host ->
             Log.d(TAG, "WiFi connected callback in state=$state to host: $host")
@@ -267,6 +279,47 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
                         updateUi()
                     }
 
+                    BLEConstants.PACKET_TYPE_DATA -> {
+                        if (!seenMessageIds.add(packet.packetId)) return
+
+                        if (packet.destNodeId == selfNodeId) {
+                            val rawMsg = String(packet.payload, Charsets.UTF_8)
+                            val decryptedMsg = EncryptionUtil.decryptMessage(rawMsg)
+                            var messageToShow = decryptedMsg
+
+                            if (decryptedMsg.startsWith("PING|")) {
+                                val parts = decryptedMsg.split("|")
+                                if (parts.size >= 2) {
+                                    val ts = parts[1]
+                                    val pongMsg = "PONG|$ts"
+                                    val encryptedPong = EncryptionUtil.encryptMessage(pongMsg)
+                                    bleAdvertiser.sendDataToNode(encryptedPong, packet.srcNodeId)
+                                    Log.d("PERF", "Received PING, returning PONG")
+                                    messageToShow = "PING Request Received"
+                                }
+                            } else if (decryptedMsg.startsWith("PONG|")) {
+                                val parts = decryptedMsg.split("|")
+                                if (parts.size >= 2) {
+                                    val sentTime = parts[1].toLongOrNull()
+                                    if (sentTime != null) {
+                                        val rtt = System.currentTimeMillis() - sentTime
+                                        val latency = rtt / 2
+                                        Log.d("PERF", "LATENCY=" + latency)
+                                        PerformanceLogger.logMessageReceived(latency)
+                                        messageToShow = "TEST packet received via PONG (Latency: ${latency}ms)"
+                                    }
+                                }
+                            }
+
+                            _receivedMessages.value = _receivedMessages.value + "From ${packet.srcNodeId.toString(16)}: $messageToShow"
+                            Log.d(TAG, "Received message from ${packet.srcNodeId.toString(16)}: $messageToShow")
+                        } else if (packet.ttl > 0) {
+                            val forwardedPacket = packet.copy(ttl = (packet.ttl - 1).toByte())
+                            bleAdvertiser.sendRawPacket(forwardedPacket)
+                            Log.d(TAG, "Forwarding msg ${packet.packetId} to ${packet.destNodeId.toString(16)}")
+                        }
+                    }
+
                     BLEConstants.PACKET_TYPE_FILE_REQUEST -> {
                         if (packet.destNodeId == selfNodeId && state == TransferState.IDLE) {
                             Log.d(TAG, "FILE_REQUEST → becoming GO")
@@ -324,6 +377,42 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
                 name = it.name,
                 rssi = it.rssi
             )
+        }
+    }
+
+    private fun loadSavedDevices() {
+        val allEntries = prefs.all
+        val list = mutableListOf<ScannedDevice>()
+        for ((nodeIdStr, name) in allEntries) {
+            val nId = nodeIdStr.toIntOrNull()
+            if (nId != null && name is String) {
+                list.add(ScannedDevice(nodeId = nId, address = "Saved", name = name, rssi = 0))
+            }
+        }
+        _savedDevices.value = list
+    }
+
+    fun saveDevice(device: ScannedDevice) {
+        prefs.edit().putString(device.nodeId.toString(), device.name ?: "Unknown").apply()
+        loadSavedDevices()
+    }
+
+    fun sendMessage(destNodeId: Int, message: String) {
+        val encryptedMessage = EncryptionUtil.encryptMessage(message)
+        val packet = bleAdvertiser.sendDataToNode(encryptedMessage, destNodeId)
+        if (packet != null) {
+            seenMessageIds.add(packet.packetId)
+            _receivedMessages.value = _receivedMessages.value + "To ${destNodeId.toString(16)}: $message"
+        }
+    }
+
+    fun sendPerformanceTestMessage(destNodeId: Int) {
+        val message = "PING|" + System.currentTimeMillis()
+        val encryptedMessage = EncryptionUtil.encryptMessage(message)
+        val packet = bleAdvertiser.sendDataToNode(encryptedMessage, destNodeId)
+        if (packet != null) {
+            seenMessageIds.add(packet.packetId)
+            PerformanceLogger.logMessageSent()
         }
     }
 }

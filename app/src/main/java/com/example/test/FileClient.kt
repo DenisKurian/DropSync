@@ -22,7 +22,7 @@ class FileClient(private val context: Context) {
     }
 
     fun sendFile(uri: Uri, host: String): Boolean {
-        val start = System.currentTimeMillis()
+        val attemptStart = System.currentTimeMillis()
         val resolver = context.contentResolver
         val displayName = queryDisplayName(uri)
         val mimeType = resolver.getType(uri) ?: "application/octet-stream"
@@ -45,7 +45,7 @@ class FileClient(private val context: Context) {
         }
 
         try {
-            while (System.currentTimeMillis() - start < MAX_WAIT) {
+            while (System.currentTimeMillis() - attemptStart < MAX_WAIT) {
                 var socket: Socket? = null
 
                 try {
@@ -58,10 +58,11 @@ class FileClient(private val context: Context) {
 
                     Log.d(TAG, "Connected to server, sending metadata...")
 
-                    // 2. Safely read stream
-                    val inputStream = FileInputStream(actualFile)
+                    // 2. Safely read to memory and encrypt
+                    val rawBytes = actualFile.readBytes()
+                    val encryptedBytes = EncryptionUtil.encryptFile(rawBytes)
+                    val newFileSize = encryptedBytes.size.toLong()
 
-                    val input = BufferedInputStream(inputStream)
                     val output = DataOutputStream(
                         BufferedOutputStream(socket.getOutputStream())
                     )
@@ -69,33 +70,30 @@ class FileClient(private val context: Context) {
                     // Send metadata
                     output.writeUTF(displayName)
                     output.writeUTF(mimeType)
-                    output.writeLong(fileSize)
+                    output.writeLong(newFileSize)
                     output.flush()
 
                     Log.d(TAG, "Metadata sent. Starting payload transfer...")
+                    val transferStart = System.currentTimeMillis()
 
                     // Send payload
-                    val buffer = ByteArray(8192)
-                    var total = 0L
-                    var remaining = fileSize
-
-                    while (remaining > 0) {
-                        val toRead = minOf(buffer.size.toLong(), remaining).toInt()
-                        val read = input.read(buffer, 0, toRead)
-                        if (read == -1) break
-
-                        output.write(buffer, 0, read)
-                        total += read
-                        remaining -= read
-                    }
+                    output.write(encryptedBytes)
+                    val total = newFileSize
 
                     output.flush()
 
-                    input.close()
                     output.close()
                     socket.close()
 
                     if (total > 0L) {
+                        val transferEnd = System.currentTimeMillis()
+                        val transferTime = (transferEnd - transferStart) / 1000.0
+                        val fileSizeMb = newFileSize.toDouble() / (1024 * 1024)
+                        val throughput = if (transferTime > 0) fileSizeMb / transferTime else 0.0
+                        
+                        Log.d("PERF", "TRANSFER_TIME=$transferTime")
+                        PerformanceLogger.logFileTransfer(fileSizeMb, transferTime, throughput)
+                    
                         Log.d(TAG, "File sent successfully ($total bytes out of expected $fileSize)")
                         return true
                     } else {

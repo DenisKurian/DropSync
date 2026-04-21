@@ -1,10 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="purple_200">#FFBB86FC</color>
-    <color name="purple_500">#FF6200EE</color>
-    <color name="purple_700">#FF3700B3</color>
-    <color name="teal_200">#FF03DAC5</color>
-    <color name="teal_700">#FF018786</color>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
+
+    <!-- Primary Brand Colors (matching your logo) -->
+    <color name="primary_dark">#0B0F2A</color>        <!-- Deep navy -->
+    <color name="primary">#1F2A6B</color>             <!-- Indigo blue -->
+    <color name="primary_light">#3F51B5</color>       <!-- Soft blue -->
+
+    <!-- Accent / Glow Colors -->
+    <color name="accent">#00C6FF</color>              <!-- Cyan -->
+    <color name="accent_light">#6FE7FF</color>        <!-- Light cyan glow -->
+
+    <!-- Background Colors -->
+    <color name="background">#050816</color>          <!-- Dark UI background -->
+    <color name="surface">#0D132B</color>             <!-- Card surface -->
+
+    <!-- Text Colors -->
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#B0BEC5</color>
+
+    <!-- Status Colors -->
+    <color name="success">#00E676</color>
+    <color name="error">#FF5252</color>
+
 </resources>
