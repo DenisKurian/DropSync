@@ -62,6 +62,40 @@ object EncryptionUtil {
         }
     }
 
+    fun encryptMessageToBytes(plainText: String): ByteArray {
+        return try {
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            val iv = ByteArray(16)
+            SecureRandom().nextBytes(iv)
+            cipher.init(Cipher.ENCRYPT_MODE, getSecretKey(), IvParameterSpec(iv))
+            val encryptedBytes = cipher.doFinal(plainText.toByteArray(Charsets.UTF_8))
+            val combined = iv + encryptedBytes
+            Log.d(TAG, "ENCRYPTED DATA: File encrypted to ${combined.size} bytes")
+            combined
+        } catch (e: Exception) {
+            Log.e(TAG, "Encryption failed", e)
+            plainText.toByteArray(Charsets.UTF_8)
+        }
+    }
+
+    fun decryptMessageFromBytes(data: ByteArray): String {
+        return try {
+            if (data.size < 16) return String(data, Charsets.UTF_8)
+            val iv = data.sliceArray(0 until 16)
+            val encryptedBytes = data.sliceArray(16 until data.size)
+
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, getSecretKey(), IvParameterSpec(iv))
+            val decryptedBytes = cipher.doFinal(encryptedBytes)
+            val plainText = String(decryptedBytes, Charsets.UTF_8)
+            Log.d(TAG, "DECRYPTED DATA: $plainText")
+            plainText
+        } catch (e: Exception) {
+            Log.e(TAG, "Decryption failed", e)
+            String(data, Charsets.UTF_8)
+        }
+    }
+
     fun encryptFile(data: ByteArray): ByteArray {
         return try {
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")

@@ -29,6 +29,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.foundation.background
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -44,6 +46,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Favorite
 
 import com.example.test.ui.theme.TestTheme
 
@@ -202,23 +206,88 @@ fun HomeScreen(bleViewModel: BLEViewModel, navController: NavController) {
         )
     }
 
+    val backgroundBrush = Brush.verticalGradient(
+        colors = listOf(
+            Color(0xFF0B192C), // Dark blue
+            Color(0xFF000000)  // Black
+        )
+    )
+
     Scaffold(
+        modifier = Modifier.background(backgroundBrush),
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { 
-                    Text(
-                        text = "DropSync", 
-                        style = MaterialTheme.typography.displaySmall, 
-                        fontWeight = FontWeight.Bold, 
-                        color = MaterialTheme.colorScheme.primary
-                    ) 
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Image(
+                            painter = painterResource(id = R.drawable.logo),
+                            contentDescription = "DropSync Logo",
+                            modifier = Modifier.size(40.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "DropSync", 
+                            fontSize = 32.sp, 
+                            fontWeight = FontWeight.ExtraBold, 
+                            color = MaterialTheme.colorScheme.primary
+                        ) 
+                    }
                 },
                 actions = {
                     TextButton(onClick = { showPerfDialog = true }) {
                         Text("PERF METRICS", fontWeight = FontWeight.Bold)
                     }
-                }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
             )
+        },
+        bottomBar = {
+            Surface(
+                color = Color.Transparent,
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    ElevatedButton(
+                        onClick = { navController.navigate("files") },
+                        modifier = Modifier.weight(1f).height(72.dp),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = ButtonDefaults.elevatedButtonColors(
+                            containerColor = Color(0xFF0E3A59),
+                            contentColor = Color.White
+                        ),
+                        elevation = ButtonDefaults.elevatedButtonElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                            Text("📂", fontSize = 24.sp)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("Received Files", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    
+                    ElevatedButton(
+                        onClick = { navController.navigate("saved") },
+                        modifier = Modifier.weight(1f).height(72.dp),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = ButtonDefaults.elevatedButtonColors(
+                            containerColor = Color(0xFF0D5C75),
+                            contentColor = Color.White
+                        ),
+                        elevation = ButtonDefaults.elevatedButtonElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                            Text("⭐", fontSize = 24.sp)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("Saved Devices", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
@@ -227,8 +296,12 @@ fun HomeScreen(bleViewModel: BLEViewModel, navController: NavController) {
                 },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
-                shape = RoundedCornerShape(16.dp)
+                shape = RoundedCornerShape(24.dp),
+                elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp),
+                modifier = Modifier.padding(16.dp).height(64.dp)
             ) {
+                Text("📤", fontSize = 20.sp)
+                Spacer(modifier = Modifier.width(8.dp))
                 Text("Send File", fontWeight = FontWeight.Bold)
             }
         }
@@ -240,34 +313,28 @@ fun HomeScreen(bleViewModel: BLEViewModel, navController: NavController) {
                 .fillMaxSize()
         ) {
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(), 
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Button(
-                    onClick = { navController.navigate("files") },
-                    modifier = Modifier.weight(1f).height(64.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
-                ) {
-                    Text("Received Files", fontWeight = FontWeight.SemiBold)
-                }
-                Button(
-                    onClick = { navController.navigate("saved") },
-                    modifier = Modifier.weight(1f).height(64.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
-                ) {
-                    Text("Saved Devices", fontWeight = FontWeight.SemiBold)
-                }
-            }
 
-            Spacer(modifier = Modifier.height(24.dp))
-            Text("Nearby Devices", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("📡", fontSize = 20.sp)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Nearby Devices", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+            }
             Spacer(modifier = Modifier.height(12.dp))
 
             if (devices.isEmpty()) {
-                Text("Scanning for nearby devices...", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                var dotCount by remember { mutableStateOf(0) }
+                LaunchedEffect(Unit) {
+                    while(true) {
+                        kotlinx.coroutines.delay(500)
+                        dotCount = (dotCount + 1) % 4
+                    }
+                }
+                val dots = ".".repeat(dotCount)
+                Text(
+                    text = "🔵 Scanning for nearby devices$dots", 
+                    fontSize = 14.sp, 
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                )
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),

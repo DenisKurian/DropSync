@@ -79,12 +79,18 @@ class BLEAdvertiser(private val context: Context) {
         }, HELLO_INTERVAL)
     }
 
+    private var wifiDirectDeviceName: String? = null
+
+    fun setDeviceName(name: String) {
+        wifiDirectDeviceName = name
+    }
+
     private fun sendHello() {
 
         if (!helloRunning || helloPaused) return
 
         val deviceName =
-            (android.os.Build.MODEL ?: "Android").take(10)
+            (wifiDirectDeviceName ?: android.os.Build.MODEL ?: "Android").take(15)
 
         val payload =
             deviceName.toByteArray(Charsets.UTF_8)
@@ -145,24 +151,72 @@ class BLEAdvertiser(private val context: Context) {
 
         val dataBytes = packet.toBytes()
 
+        if (dataBytes.size > 54 && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O && adapter?.isLeExtendedAdvertisingSupported == true) {
+            val parameters = AdvertisingSetParameters.Builder()
+                .setLegacyMode(false)
+                .setInterval(AdvertisingSetParameters.INTERVAL_LOW)
+                .setTxPowerLevel(AdvertisingSetParameters.TX_POWER_MEDIUM)
+                .setConnectable(false)
+                .build()
+
+            val extData = AdvertiseData.Builder()
+                .addManufacturerData(BLEConstants.MANUFACTURER_ID, dataBytes)
+                .build()
+
+            val extCallback = object : AdvertisingSetCallback() {
+                override fun onAdvertisingSetStarted(
+                    advertisingSet: AdvertisingSet?,
+                    txPower: Int,
+                    status: Int
+                ) {
+                    Log.d(TAG, "Extended Packet advertised → type=${packet.type} id=${packet.packetId} status=$status")
+                }
+                override fun onAdvertisingSetStopped(advertisingSet: AdvertisingSet?) {
+                    Log.d(TAG, "Extended Packet stopped → id=${packet.packetId}")
+                }
+            }
+
+            try {
+                advertiser?.startAdvertisingSet(parameters, extData, null, null, null, extCallback)
+                
+                handler.postDelayed({
+                    try {
+                        advertiser?.stopAdvertisingSet(extCallback)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to stop extended adv", e)
+                    }
+                    advertisingBusy = false
+                }, ADVERTISE_DURATION)
+                return
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start extended advertising", e)
+                // Fallback to legacy if this throws for some reason
+            }
+        }
+
+        // Fallback to Legacy Advertising with dual-chunk splitting
+        val chunk1 = dataBytes.take(27).toByteArray()
+        val chunk2 = dataBytes.drop(27).take(27).toByteArray()
+
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
             .setConnectable(false)
             .build()
 
-        val data = AdvertiseData.Builder()
-            .addManufacturerData(
-                BLEConstants.MANUFACTURER_ID,
-                dataBytes
-            )
-            .build()
+        val dataBuilder = AdvertiseData.Builder()
+            .addManufacturerData(BLEConstants.MANUFACTURER_ID, chunk1)
+
+        val scanBuilder = AdvertiseData.Builder()
+        if (chunk2.isNotEmpty()) {
+            scanBuilder.addManufacturerData(BLEConstants.MANUFACTURER_ID + 1, chunk2)
+        }
 
         callback = object : AdvertiseCallback() {
 
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
 
-                Log.d(TAG, "Packet advertised → type=${packet.type} id=${packet.packetId}")
+                Log.d(TAG, "Packet advertised → type=${packet.type} id=${packet.packetId} (chunks=${if(chunk2.isEmpty()) 1 else 2})")
             }
 
             override fun onStartFailure(errorCode: Int) {
@@ -173,7 +227,11 @@ class BLEAdvertiser(private val context: Context) {
             }
         }
 
-        advertiser?.startAdvertising(settings, data, callback)
+        if (chunk2.isNotEmpty()) {
+            advertiser?.startAdvertising(settings, dataBuilder.build(), scanBuilder.build(), callback)
+        } else {
+            advertiser?.startAdvertising(settings, dataBuilder.build(), callback)
+        }
 
         handler.postDelayed({
 
@@ -185,7 +243,7 @@ class BLEAdvertiser(private val context: Context) {
     /* ================= SEND DIRECT DATA ================= */
 
     fun sendDataToNode(
-        message: String,
+        payloadBytes: ByteArray,
         destNodeId: Int
     ): MeshPacket? {
 
@@ -196,8 +254,8 @@ class BLEAdvertiser(private val context: Context) {
 
         pauseHello()
 
-        val payloadBytes =
-            message.toByteArray(Charsets.UTF_8).take(BLEConstants.MAX_PAYLOAD_SIZE).toByteArray()
+        val payloadBytesFinal =
+            payloadBytes.take(BLEConstants.MAX_PAYLOAD_SIZE).toByteArray()
 
         val packet = MeshPacket(
             version = BLEConstants.PROTOCOL_VERSION,
@@ -206,7 +264,7 @@ class BLEAdvertiser(private val context: Context) {
             srcNodeId = selfNodeId,
             destNodeId = destNodeId,
             ttl = BLEConstants.DEFAULT_TTL,
-            payload = payloadBytes
+            payload = payloadBytesFinal
         )
 
         handler.postDelayed({
@@ -226,10 +284,10 @@ class BLEAdvertiser(private val context: Context) {
         return packet
     }
 
-    fun sendBroadcast(message: String): MeshPacket? {
+    fun sendBroadcast(payloadBytes: ByteArray): MeshPacket? {
 
         return sendDataToNode(
-            message,
+            payloadBytes,
             BLEConstants.BROADCAST_NODE_ID
         )
     }

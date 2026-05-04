@@ -28,6 +28,7 @@ class WifiDirectController(private val context: Context) {
     var onPeersAvailable: ((Collection<WifiP2pDevice>) -> Unit)? = null
     var onDisconnected: (() -> Unit)? = null
     var onConnectionFailed: (() -> Unit)? = null
+    var onThisDeviceChanged: ((WifiP2pDevice) -> Unit)? = null
 
     private val receiver = WifiDirectReceiver(manager, channel, this)
     private val handler = Handler(Looper.getMainLooper())

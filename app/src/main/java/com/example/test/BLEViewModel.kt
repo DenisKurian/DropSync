@@ -73,6 +73,10 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
     init {
         loadSavedDevices()
 
+        wifi.onThisDeviceChanged = { device ->
+            bleAdvertiser.setDeviceName(device.deviceName)
+        }
+
         wifi.onConnected = { host ->
             Log.d(TAG, "WiFi connected callback in state=$state to host: $host")
 
@@ -140,8 +144,15 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
 
             if (state == TransferState.CONNECTING_WIFI && !isConnecting) {
                 if (peers.isNotEmpty()) {
-                    val device = peers.first()
-                    Log.d(TAG, "Connecting to: ${device.deviceName}")
+                    val targetName = _savedDevices.value.find { it.nodeId == targetNodeId }?.name
+                        ?: _devices.value.find { it.nodeId == targetNodeId }?.name
+
+                    // Try exact match, then prefix/contains, fallback to first peer if not found
+                    val device = peers.find { it.deviceName == targetName }
+                        ?: peers.find { targetName != null && (it.deviceName.contains(targetName, ignoreCase = true) || targetName.contains(it.deviceName, ignoreCase = true)) }
+                        ?: peers.first()
+
+                    Log.d(TAG, "Connecting to: ${device.deviceName} (Target was: $targetName)")
                     isConnecting = true
                     wifi.connect(device)
                 } else {
@@ -246,9 +257,15 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
 
         if (scanning) return
 
-        val settings = ScanSettings.Builder()
+        val settingsBuilder = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .build()
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            settingsBuilder.setLegacy(false)
+            settingsBuilder.setPhy(ScanSettings.PHY_LE_ALL_SUPPORTED)
+        }
+
+        val settings = settingsBuilder.build()
 
         val filter = ScanFilter.Builder()
             .setManufacturerData(BLEConstants.MANUFACTURER_ID, byteArrayOf())
@@ -259,8 +276,10 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
 
                 val record = result.scanRecord ?: return
-                val data = record.manufacturerSpecificData[BLEConstants.MANUFACTURER_ID] ?: return
-                val packet = MeshPacket.fromBytes(data) ?: return
+                val chunk1 = record.manufacturerSpecificData[BLEConstants.MANUFACTURER_ID] ?: return
+                val chunk2 = record.manufacturerSpecificData[BLEConstants.MANUFACTURER_ID + 1] ?: byteArrayOf()
+                val fullData = chunk1 + chunk2
+                val packet = MeshPacket.fromBytes(fullData) ?: return
 
                 if (packet.srcNodeId == selfNodeId) return
 
@@ -283,8 +302,7 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
                         if (!seenMessageIds.add(packet.packetId)) return
 
                         if (packet.destNodeId == selfNodeId) {
-                            val rawMsg = String(packet.payload, Charsets.UTF_8)
-                            val decryptedMsg = EncryptionUtil.decryptMessage(rawMsg)
+                            val decryptedMsg = EncryptionUtil.decryptMessageFromBytes(packet.payload)
                             var messageToShow = decryptedMsg
 
                             if (decryptedMsg.startsWith("PING|")) {
@@ -292,7 +310,7 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
                                 if (parts.size >= 2) {
                                     val ts = parts[1]
                                     val pongMsg = "PONG|$ts"
-                                    val encryptedPong = EncryptionUtil.encryptMessage(pongMsg)
+                                    val encryptedPong = EncryptionUtil.encryptMessageToBytes(pongMsg)
                                     bleAdvertiser.sendDataToNode(encryptedPong, packet.srcNodeId)
                                     Log.d("PERF", "Received PING, returning PONG")
                                     messageToShow = "PING Request Received"
@@ -398,7 +416,7 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendMessage(destNodeId: Int, message: String) {
-        val encryptedMessage = EncryptionUtil.encryptMessage(message)
+        val encryptedMessage = EncryptionUtil.encryptMessageToBytes(message)
         val packet = bleAdvertiser.sendDataToNode(encryptedMessage, destNodeId)
         if (packet != null) {
             seenMessageIds.add(packet.packetId)
@@ -408,7 +426,7 @@ class BLEViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendPerformanceTestMessage(destNodeId: Int) {
         val message = "PING|" + System.currentTimeMillis()
-        val encryptedMessage = EncryptionUtil.encryptMessage(message)
+        val encryptedMessage = EncryptionUtil.encryptMessageToBytes(message)
         val packet = bleAdvertiser.sendDataToNode(encryptedMessage, destNodeId)
         if (packet != null) {
             seenMessageIds.add(packet.packetId)
